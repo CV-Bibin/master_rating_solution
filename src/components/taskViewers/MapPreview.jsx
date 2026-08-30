@@ -24,12 +24,32 @@ const createResultIcon = (index) => {
   });
 };
 
-const createAiIcon = (index) => L.divIcon({
-  className: "bg-transparent border-none z-[999]",
-  html: `<div class="w-7 h-7 rounded-full bg-emerald-500 text-white text-[10px] font-bold flex items-center justify-center shadow-lg ring-2 ring-emerald-200">AI ${index + 1}</div>`,
-  iconSize: [28, 28],
-  iconAnchor: [14, 14],
-});
+const createAiIcon = (index, isActive) => {
+  // 1. Clicked State: Small circle
+  if (isActive) {
+    return L.divIcon({
+      className: "bg-transparent border-none z-[999]",
+      html: `<div class="w-3 h-3 rounded-full bg-emerald-600 border border-white shadow-sm"></div>`,
+      iconSize: [12, 12],
+      iconAnchor: [6, 6],
+    });
+  }
+
+  // 2. Default State: Blinking/Pulsing effect
+  return L.divIcon({
+    className: "bg-transparent border-none z-[999]",
+    html: `
+      <div class="relative flex h-7 w-7">
+        <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+        <span class="relative inline-flex rounded-full h-7 w-7 bg-emerald-500 text-white text-[10px] font-bold items-center justify-center shadow-lg ring-2 ring-emerald-200 transition-all duration-300">
+          AI ${index + 1}
+        </span>
+      </div>
+    `,
+    iconSize: [28, 28],
+    iconAnchor: [14, 14],
+  });
+};
 
 function MapControlButtons({ userPoint, viewportCenter, viewportBounds, results, showLines, setShowLines }) {
   const map = useMap();
@@ -70,6 +90,7 @@ export default function MapPreview({
   aiResult
 }) {
   const [mapType, setMapType] = useState("standard");
+  const [activeAiPin, setActiveAiPin] = useState(null);
   const [showLines, setShowLines] = useState(false);
   const [viewportDims, setViewportDims] = useState({ width: 1, height: 1 });
   const [originalDims, setOriginalDims] = useState({ width: 1, height: 1, hasData: false });
@@ -249,18 +270,34 @@ export default function MapPreview({
           );
         })}
 
-        {/* Toggled AI Discovered Real World Pins */}
-        {showAiPins && aiPins.map((aiPin, index) => (
-          <Marker key={`ai-${index}`} position={[aiPin.point.lat, aiPin.point.lng]} icon={createAiIcon(index)}>
-            <Popup className="min-w-[200px]">
-              <div className="text-xs font-bold text-emerald-700 border-b border-emerald-100 pb-1 mb-1">
-                AI Discovery {index + 1}
-              </div>
-              <div className="text-xs font-bold text-slate-800">{aiPin.realWorldName}</div>
-              <div className="text-[10px] text-slate-600 mt-1">{aiPin.realWorldAddress}</div>
-            </Popup>
-          </Marker>
-        ))}
+       {/* Toggled AI Discovered Real World Pins */}
+{showAiPins && aiPins.map((aiPin, index) => (
+  <Marker 
+    key={`ai-${index}`} 
+    position={[aiPin.point.lat, aiPin.point.lng]} 
+    icon={createAiIcon(index, activeAiPin === index)}
+    eventHandlers={{
+      click: () => setActiveAiPin(index),
+      popupclose: () => setActiveAiPin(null)
+    }}
+  >
+    <Popup className="min-w-[200px]">
+      <div className="text-xs font-bold text-emerald-700 border-b border-emerald-100 pb-1 mb-1 flex justify-between">
+        <span>AI Discovery {index + 1}</span>
+      </div>
+      <div className="text-xs font-bold text-slate-800">{aiPin.realWorldName}</div>
+      <div className="text-[10px] text-slate-600 mt-1">{aiPin.realWorldAddress}</div>
+      
+      {/* NEW: Coordinates View */}
+      <div className="text-[10px] font-mono text-slate-400 mt-1.5 pt-1.5 border-t border-slate-100 flex items-center gap-1">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3 h-3 text-slate-300">
+          <path fillRule="evenodd" d="M9.69 18.933l.003.001C9.89 19.02 10 19 10 19s.11.02.308-.066l.002-.001.006-.003.018-.008a5.741 5.741 0 00.281-.14c.186-.096.446-.24.757-.433.62-.384 1.445-.966 2.274-1.765C15.302 14.988 17 12.493 17 9A7 7 0 103 9c0 3.492 1.698 5.988 3.355 7.584a13.731 13.731 0 002.273 1.765 11.842 11.842 0 00.976.544l.062.029.018.008.006.003zM10 11.25a2.25 2.25 0 100-4.5 2.25 2.25 0 000 4.5z" clipRule="evenodd" />
+        </svg>
+        {aiPin.point.lat.toFixed(6)}, {aiPin.point.lng.toFixed(6)}
+      </div>
+    </Popup>
+  </Marker>
+))}
 
         {results.map((result, index) => {
           const point = parseLatLng(result.lat_lng || result.pinLatLng);
