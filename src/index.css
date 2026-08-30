@@ -1,0 +1,9 @@
+/* src/index.css */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* You can still add custom CSS here if you ever need it */
+body {
+  background-color: #f3f4f6; /* A clean, minimalist light gray */
+}
