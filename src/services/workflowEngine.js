@@ -23,106 +23,376 @@ if (apiKeys.length === 0) {
   console.error("FATAL: No Gemini API keys found in .env.local");
 }
 
+// ============================================================
+// GEMINI API KEY MANAGEMENT
+// ============================================================
+
 let currentClientIndex = 0;
 
-const getAiClient = () => {
+/**
+ * Create a Gemini client using a specific API key.
+ *
+ * The key index is passed explicitly so that the retry system
+ * can control exactly which key is being used.
+ */
+const getAiClient = (keyIndex) => {
   if (apiKeys.length === 0) {
-    throw new Error("No Gemini API keys configured.");
+    throw new Error(
+      "No Gemini API keys configured. Check VITE_GEMINI_API_KEYS in .env.local."
+    );
   }
 
-  const key = apiKeys[currentClientIndex];
-  // Automatically rotate to the next key for the next request
-  currentClientIndex = (currentClientIndex + 1) % apiKeys.length;
+  const key = apiKeys[keyIndex];
 
-  return new GoogleGenAI({ apiKey: key });
+  if (!key) {
+    throw new Error(
+      `Gemini API key ${keyIndex + 1} does not exist.`
+    );
+  }
+
+  return new GoogleGenAI({
+    apiKey: key,
+  });
 };
 
-const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const delay = (ms) =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
+
+// ============================================================
+// GEMINI AUTO-HEALING / MODEL CASCADE
+//
+// Model priority:
+//
+// 1. Gemini 3.7 Flash
+// 2. Gemini 3.6 Flash
+// 3. Gemini 3.5 Flash
+// 4. Gemini 3.5 Flash-Lite
+//
+// For EACH model:
+//     Try every available API key.
+//
+// Number of API keys is automatically detected from .env.local.
+// There is NO hardcoded number of keys.
+// ============================================================
 
 const executeWithAutoHealing = async (prompt) => {
-  const modelCascade = (
+ const modelCascade = (
     import.meta.env.VITE_GEMINI_MODELS ||
-    "gemini-2.5-flash,gemini-2.0-flash,gemini-1.5-flash,gemini-1.5-pro"
+    "gemini-3.7-flash,gemini-3.6-flash,gemini-2.5-flash"
   )
     .split(",")
     .map((model) => model.trim())
     .filter(Boolean);
 
+  if (apiKeys.length === 0) {
+    throw new Error(
+      "No Gemini API keys configured. Check VITE_GEMINI_API_KEYS in .env.local."
+    );
+  }
+
+  if (modelCascade.length === 0) {
+    throw new Error(
+      "No Gemini models configured. Check VITE_GEMINI_MODELS in .env.local."
+    );
+  }
+
   let lastError = null;
-  // Try at least 3 times, or up to the total number of API keys you provided
-  const maxAttemptsPerModel = Math.max(3, apiKeys.length);
+
+  console.log("==============================================");
+  console.log("GEMINI AUTO-HEALING STARTED");
+  console.log("Models:", modelCascade);
+  console.log("Available API keys:", apiKeys.length);
+  console.log("==============================================");
+
+  /*
+   * MODEL PRIORITY:
+   *
+   * 1. gemini-3.7-flash
+   * 2. gemini-3.6-flash
+   * 3. gemini-3.5-flash
+   * 4. gemini-3.5-flash-lite
+   *
+   * For each model:
+   *     Try every available API key.
+   *
+   * Number of keys is automatically detected.
+   */
 
   for (const modelName of modelCascade) {
-    for (let attempt = 1; attempt <= maxAttemptsPerModel; attempt++) {
+    console.log("");
+    console.log(`========== MODEL: ${modelName} ==========`);
+
+    let modelShouldStop = false;
+
+    for (
+      let keyAttempt = 0;
+      keyAttempt < apiKeys.length;
+      keyAttempt++
+    ) {
+      const keyIndex =
+        (currentClientIndex + keyAttempt) % apiKeys.length;
+
       try {
-        // This will automatically grab a new key on every retry
-        const ai = getAiClient();
+        console.log(
+          `Trying ${modelName} | API Key ${keyIndex + 1}/${apiKeys.length}`
+        );
+
+        const ai = getAiClient(keyIndex);
+
+       // Conditionally apply thinking configuration only for 3.x series models to avoid 400 errors on 2.5 models
+        const isGemini3Series = modelName.includes("gemini-3");
+        
+        let apiConfig = {
+          tools: [{ googleSearch: {} }],
+        };
+
+        if (isGemini3Series) {
+          apiConfig.thinkingConfig = {
+            thinkingLevel: modelName === "gemini-3.7-flash" ? "high" : "medium"
+          };
+        }
 
         const response = await ai.models.generateContent({
           model: modelName,
           contents: prompt,
+          config: apiConfig,
         });
+
+        /*
+         * SUCCESS
+         *
+         * Start the next request from the key after
+         * the successful key.
+         */
+        currentClientIndex =
+          (keyIndex + 1) % apiKeys.length;
+
+        console.log(
+          `SUCCESS: ${modelName} | API Key ${keyIndex + 1}`
+        );
+
+        console.log("==============================================");
 
         return response.text;
       } catch (error) {
         lastError = error;
 
-        const status = error?.status || error?.response?.status;
-        const message = error?.message || "Unknown Gemini error";
+        const status =
+          error?.status ??
+          error?.response?.status ??
+          error?.error?.code ??
+          null;
+
+        const message =
+          error?.message ||
+          "Unknown Gemini error";
 
         console.warn(
-          `Gemini failed. Model=${modelName}, Attempt=${attempt}, Status=${status}, Message=${message}`
+          `FAILED: Model=${modelName} | Key=${keyIndex + 1}/${apiKeys.length} | Status=${status} | ${message}`
         );
 
-        // 1. FATAL: Bad Prompt (Don't retry, prompt is broken)
-        if (status === 400) {
-          throw new Error(
-            `Gemini rejected the request (400). Your prompt may be too large or invalid. Details: ${message}`
-          );
-        }
+        /*
+         * =====================================================
+         * 401 / 403
+         * =====================================================
+         *
+         * Invalid key / permission problem.
+         *
+         * Do NOT retry this key.
+         * Immediately move to the next key.
+         */
 
-        // 2. UNAUTHORIZED / BLOCKED (401, 403) - Key rotation & Model Fallback
         if (status === 401 || status === 403) {
-          console.warn(`Access Denied (403). Key may be invalid or model restricted. Rotating API key...`);
-          if (attempt < maxAttemptsPerModel) {
-            continue; // Instantly loop again. getAiClient() will hand out the NEXT key.
-          } else {
-            break; // Exhausted all keys for this model. Break inner loop and try the NEXT model.
-          }
+          console.warn(
+            `Key ${keyIndex + 1} rejected. Trying next key...`
+          );
+
+          continue;
         }
 
-        // 3. SKIP: Model Doesn't Exist
+        /*
+         * =====================================================
+         * 404
+         * =====================================================
+         *
+         * Model unavailable / invalid model ID.
+         *
+         * Another key cannot fix this.
+         *
+         * Move immediately to next model.
+         */
+
         if (status === 404) {
-          console.warn(`Model ${modelName} not found (404). Skipping to next model.`);
-          break; // Break the attempt loop, go to the next model in the cascade
+          console.warn(
+            `Model ${modelName} unavailable (404).`
+          );
+
+          modelShouldStop = true;
+          break;
         }
 
-        // 4. RETRY: Rate Limited (429) or Server Overload (503)
-        if (status === 429 || status === 503) {
-          if (attempt < maxAttemptsPerModel) {
-            // Exponential backoff: 2s, 4s...
-            const backoffMs = 1000 * Math.pow(2, attempt); 
-            await delay(backoffMs);
+        /*
+         * =====================================================
+         * 400
+         * =====================================================
+         *
+         * Bad request.
+         *
+         * Another key will normally NOT fix the request.
+         *
+         * Move to the next model.
+         */
+
+        if (status === 400) {
+          console.warn(
+            `Bad request (400) from ${modelName}.`
+          );
+
+          console.warn(
+            "Moving to next model..."
+          );
+
+          modelShouldStop = true;
+          break;
+        }
+
+        /*
+         * =====================================================
+         * 429
+         * =====================================================
+         *
+         * Rate limit / quota for this API key.
+         *
+         * This is exactly where your multiple keys help.
+         *
+         * Move immediately to the next key.
+         */
+
+        if (status === 429) {
+          const lowerMessage = message.toLowerCase();
+
+          const isQuotaExhausted =
+            lowerMessage.includes("quota") ||
+            lowerMessage.includes("resource_exhausted") ||
+            lowerMessage.includes("exceeded your current quota");
+
+          if (isQuotaExhausted) {
+            console.warn(
+              `API Key ${keyIndex + 1} appears quota-exhausted. Trying next key...`
+            );
+
+            continue;
+          }
+
+          console.warn(
+            `Temporary 429 rate limit on Key ${keyIndex + 1}.`
+          );
+
+          // Give this key a short recovery period before moving on.
+          await delay(3000);
+
+          continue;
+        }
+
+        /*
+         * =====================================================
+         * 503
+         * =====================================================
+         *
+         * Temporary Gemini server problem.
+         *
+         * Wait briefly, retry SAME key once.
+         * If it fails, move to next key.
+         */
+
+        if (status === 503) {
+          console.warn(
+            `Gemini 503 on Key ${keyIndex + 1}. Retrying once...`
+          );
+
+          await delay(2000);
+
+          try {
+            const retryClient = getAiClient(keyIndex);
+
+            const isGemini3Series = modelName.includes("gemini-3");
+            let retryConfig = {
+              tools: [{ googleSearch: {} }],
+            };
+
+            if (isGemini3Series) {
+              retryConfig.thinkingConfig = {
+                thinkingLevel: modelName === "gemini-3.7-flash" ? "high" : "medium"
+              };
+            }
+
+            const retryResponse =
+              await retryClient.models.generateContent({
+                model: modelName,
+                contents: prompt,
+                config: retryConfig,
+              });
+
+            currentClientIndex =
+              (keyIndex + 1) % apiKeys.length;
+
+            console.log(
+              `SUCCESS AFTER 503 RETRY: ${modelName} | API Key ${keyIndex + 1}`
+            );
+
+            return retryResponse.text;
+          } catch (retryError) {
+            lastError = retryError;
+
+            console.warn(
+              `503 retry failed on Key ${keyIndex + 1}. Trying next key...`
+            );
+
             continue;
           }
         }
 
-        // Fallback delay for unknown temporary errors
-        if (attempt < maxAttemptsPerModel) {
-          await delay(1000);
-        }
+        /*
+         * =====================================================
+         * UNKNOWN ERROR
+         * =====================================================
+         *
+         * Try another key.
+         */
+
+        console.warn(
+          `Unknown error. Trying next API key...`
+        );
+
+        continue;
       }
     }
 
-    console.warn(`Switching to next Gemini model after failures: ${modelName}`);
+    if (modelShouldStop) {
+      console.warn(
+        `Skipping remaining keys for ${modelName}.`
+      );
+    }
+
+    console.warn(
+      `ALL AVAILABLE KEYS EXHAUSTED/FAILED FOR ${modelName}.`
+    );
+
+    console.warn(
+      `Switching to next model...`
+    );
   }
+
+  console.error(
+    "ALL GEMINI MODELS AND API KEYS FAILED."
+  );
 
   throw new Error(
     lastError?.message ||
-      "All Gemini models and API keys failed. Verify your API keys in .env.local."
+    "All Gemini models and API keys failed. Verify API keys, quotas, permissions, and model configuration."
   );
 };
-
 function getPathValue(data, path) {
   if (!data || !path) return undefined;
 
@@ -144,7 +414,7 @@ function getPathValue(data, path) {
 
 function buildSelectedTaskData(parsedTask, requiredInputKeys = []) {
   // Safe fallback: If no keys are specified, pass the whole task so it doesn't break
-  if (!requiredInputKeys.length) return parsedTask; 
+  if (!requiredInputKeys.length) return parsedTask;
 
   const selected = {};
 
@@ -309,6 +579,11 @@ Return only the result requested by this workflow step.
         selectedGuidelineIds: step.selectedGuidelineIds || [],
         result,
       });
+
+      // MANDATORY COOLDOWN: Prevents 429 Free Tier Rate Limit errors
+      // by forcing a 4-second pause between each workflow step.
+      console.log(`Step complete. Waiting 4 seconds to respect Free Tier limits...`);
+      await delay(4000); 
     }
 
     const lastStep = stepOutputs[stepOutputs.length - 1];

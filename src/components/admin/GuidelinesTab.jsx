@@ -1,4 +1,6 @@
 // src/components/admin/GuidelinesTab.jsx
+import Modal from "../common/Modal";
+import NotebookEditor from "../common/NotebookEditor";
 import { useEffect, useMemo, useState } from "react";
 import {
   addDoc,
@@ -51,6 +53,7 @@ export default function GuidelinesTab({ projectId }) {
   const [searchText, setSearchText] = useState("");
   const [topicFilter, setTopicFilter] = useState("all");
   const [errorMessage, setErrorMessage] = useState("");
+  const [notebookField, setNotebookField] = useState(null);
 
   useEffect(() => {
     if (!projectId) {
@@ -361,25 +364,27 @@ export default function GuidelinesTab({ projectId }) {
               </p>
             </div>
 
-            <div>
-              <label className="block text-sm font-semibold text-slate-700 mb-1">
-                Diagnostic Steps / Checklist
-              </label>
+            <div className="space-y-1">
+              <div className="flex justify-between items-end">
+                <label className="text-sm font-bold text-slate-700">Diagnostic Steps / Checklist</label>
+                <button 
+                  type="button" 
+                  onClick={() => setNotebookField("diagnosticSteps")}
+                  className="text-xs text-blue-600 hover:text-blue-800 font-semibold flex items-center gap-1"
+                >
+                  <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
+                  </svg>
+                  Open Notebook View
+                </button>
+              </div>
               <textarea
                 value={form.diagnosticSteps}
-                onChange={(event) =>
-                  updateForm("diagnosticSteps", event.target.value)
-                }
-                placeholder={`Step 1 - Determine query type
-Step 2 - Determine user intent
-Step 3 - Check navigational intent
-Step 4 - Check proximity or explicit location
-Step 5 - Decide expected result origin`}
+                onChange={(event) => updateForm("diagnosticSteps", event.target.value)}
+                placeholder={`Step 1 - Determine query type\nStep 2 - Determine user intent`}
                 className="w-full h-36 px-4 py-2 border border-slate-300 rounded-lg resize-y focus:ring-2 focus:ring-blue-500 outline-none"
               />
-              <p className="text-xs text-slate-400 mt-1">
-                Put the exact checks AI should perform here.
-              </p>
+              <p className="text-xs text-slate-400 mt-1">Put the exact checks AI should perform here.</p>
             </div>
 
             <div className="grid grid-cols-[280px_1fr] gap-4">
@@ -403,6 +408,8 @@ Step 5 - Decide expected result origin`}
                   </option>
                   <option value="external_research_required">
                     External research required
+                  </option>
+                  <option value="hybrid_ai_and_external">Hybrid: AI Knowledge + External Search
                   </option>
                 </select>
                 <p className="text-xs text-slate-400 mt-1">
@@ -429,10 +436,20 @@ Step 5 - Decide expected result origin`}
               </div>
             </div>
 
-            <div>
-              <label className="block text-sm font-semibold text-slate-700 mb-1">
-                Principle / Rule Text
-              </label>
+          <div className="space-y-1">
+              <div className="flex justify-between items-end">
+                <label className="text-sm font-bold text-slate-700">Principle / Rule Text</label>
+                <button 
+                  type="button" 
+                  onClick={() => setNotebookField("principle")}
+                  className="text-xs text-blue-600 hover:text-blue-800 font-semibold flex items-center gap-1"
+                >
+                  <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
+                  </svg>
+                  Open Notebook View
+                </button>
+              </div>
               <textarea
                 value={form.principle}
                 onChange={(event) => updateForm("principle", event.target.value)}
@@ -441,21 +458,27 @@ Step 5 - Decide expected result origin`}
               />
             </div>
 
-            <div>
-              <label className="block text-sm font-semibold text-slate-700 mb-1">
-                Expected AI Output
-              </label>
+         <div className="space-y-1">
+              <div className="flex justify-between items-end">
+                <label className="text-sm font-bold text-slate-700">Expected AI Output</label>
+                <button 
+                  type="button" 
+                  onClick={() => setNotebookField("expectedOutput")}
+                  className="text-xs text-blue-600 hover:text-blue-800 font-semibold flex items-center gap-1"
+                >
+                  <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
+                  </svg>
+                  Open Notebook View
+                </button>
+              </div>
               <textarea
                 value={form.expectedOutput}
-                onChange={(event) =>
-                  updateForm("expectedOutput", event.target.value)
-                }
-                placeholder="Return queryAnalysis with queryType, userIntent, locationIntent, isNavigational, researchNeeded, confidence..."
+                onChange={(event) => updateForm("expectedOutput", event.target.value)}
+                placeholder="Return queryAnalysis with queryType, userIntent..."
                 className="w-full h-28 px-4 py-2 border border-slate-300 rounded-lg resize-y focus:ring-2 focus:ring-blue-500 outline-none"
               />
-              <p className="text-xs text-slate-400 mt-1">
-                Mention what AI should return when this guideline is used.
-              </p>
+              <p className="text-xs text-slate-400 mt-1">Mention what AI should return when this guideline is used.</p>
             </div>
 
             <div className="flex items-center justify-between pt-2">
@@ -625,7 +648,27 @@ Step 5 - Decide expected result origin`}
             ))}
           </div>
         )}
+
+        
       </div>
+      {/* NOTEBOOK EDITOR MODAL */}
+      <Modal 
+        isOpen={notebookField !== null} 
+        onClose={() => setNotebookField(null)} 
+        title={`Edit ${notebookField}`}
+        maxWidth="max-w-4xl"
+      >
+        {notebookField && (
+          <NotebookEditor 
+            initialText={form[notebookField] || ""} 
+            onSave={(newText) => {
+              updateForm(notebookField, newText);
+              setNotebookField(null);
+            }}
+            onCancel={() => setNotebookField(null)}
+          />
+        )}
+      </Modal>
     </div>
   );
 }
