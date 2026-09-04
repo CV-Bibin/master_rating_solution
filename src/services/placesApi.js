@@ -29,17 +29,18 @@ export async function searchNearbyPlaces(searchQuery, locationString = "") {
     anchorLng = parseFloat(coordsMatch[2]);
   }
 
-  const fullQuery = `${searchQuery} ${locationString}`.trim();
+  // FIX: Keep the text query clean. Do NOT append raw coordinate strings to it.
+  const cleanQuery = searchQuery.trim();
   const url = 'https://places.googleapis.com/v1/places:searchText';
 
-  const requestBody = { textQuery: fullQuery };
+  const requestBody = { textQuery: cleanQuery };
 
-  // CHANGED: Use locationRestriction to forbid IP-based fallbacks
+  // Pass coordinates explicitly into locationBias so Google prioritizes true proximity
   if (anchorLat !== null && anchorLng !== null) {
-    requestBody.locationRestriction = {
+    requestBody.locationBias = {
       circle: {
         center: { latitude: anchorLat, longitude: anchorLng },
-        radius: 50000 // CHANGED: 50,000 meters (50km)
+        radius: 15000 // 15km radius to target truly local results first
       }
     };
   }
@@ -69,10 +70,9 @@ export async function searchNearbyPlaces(searchQuery, locationString = "") {
         distanceKm = getDistanceInKm(anchorLat, anchorLng, placeLat, placeLng);
       }
 
-      // CHANGED: Filter set to 50 km to match the new LLM guidelines
       if (distanceKm !== null && distanceKm > 50) continue;
 
-      const safeDistance = distanceKm !== null ? `${distanceKm.toFixed(2)} km` : "Distance unavailable (No anchor provided)";
+      const safeDistance = distanceKm !== null ? `${distanceKm.toFixed(2)} km` : "Distance unavailable";
       const safeLatLng = (placeLat && placeLng) ? `${placeLat}, ${placeLng}` : "0.0, 0.0";
 
       processedResults.push({
@@ -80,9 +80,13 @@ export async function searchNearbyPlaces(searchQuery, locationString = "") {
         address: place.formattedAddress || "No address provided",
         latLng: safeLatLng,
         distanceFromUser: safeDistance,
-        businessStatus: "OPERATIONAL"
+        businessStatus: "OPERATIONAL",
+        rawDistance: distanceKm !== null ? distanceKm : 999 // Used for sorting
       });
     }
+
+    // Sort results by actual physical proximity (nearest first)
+    processedResults.sort((a, b) => a.rawDistance - b.rawDistance);
 
     return processedResults.slice(0, 10).map((place, index) => ({
       rank: index + 1,
