@@ -8,6 +8,7 @@ import {
 } from "firebase/firestore";
 import { GoogleGenAI } from "@google/genai";
 import { db } from "../firebase";
+import { searchNearbyPlaces } from "./placesApi";
 
 const keysString =
   import.meta.env.VITE_GEMINI_API_KEYS ||
@@ -520,8 +521,18 @@ export async function runAiWorkflow(projectId, parsedTask) {
       .filter((guide) => guide.status !== "draft")
       .sort((a, b) => (b.priority || 0) - (a.priority || 0));
 
+    // Fetch live ground truth data from Google Maps API before running workflow
+    const anchorCoords = parsedTask.viewportCenter || parsedTask.userLatLng || "";
+    const liveMapsData = await searchNearbyPlaces(parsedTask.query, anchorCoords);
+    const liveMapsContext = liveMapsData.length > 0 
+      ? JSON.stringify(liveMapsData, null, 2) 
+      : "No locations found in Google Maps.";
+
     const stepOutputs = [];
 
+
+
+    
     for (const step of activeSteps) {
       const selectedTaskData = buildSelectedTaskData(
         parsedTask,
@@ -563,6 +574,10 @@ ${selectedGuidelinesText || "No guidelines selected for this step."}
 
 PREVIOUS AI STEP OUTPUTS:
 ${previousStepContext || "None"}
+
+LIVE GOOGLE MAPS API RESULTS (GROUND TRUTH):
+Use this live database data for exact coordinates and addresses. Do not hallucinate coordinates.
+${liveMapsContext}
 
 TASK:
 Follow only the selected guideline condition, diagnostic steps, principle, research policy, and expected AI output.
