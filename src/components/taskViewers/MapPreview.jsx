@@ -4,6 +4,7 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { parseLatLng, estimateViewportDimensions, calculateBoundsFromDimensions, getDistanceKm, calculateViewportError } from "../../utils/viewportEstimator";
 import AiOverlayControls from "./AiOverlayControls";
+import AiRelevancePanel from "../AiRelevancePanel";
 
 const RESULT_COLORS = ["bg-violet-500", "bg-sky-500", "bg-emerald-500", "bg-yellow-500", "bg-orange-500"];
 
@@ -25,40 +26,40 @@ const createResultIcon = (index) => {
 };
 
 const createAiIcon = (index, isActive) => {
-  // 1. Clicked State: Small circle
   if (isActive) {
     return L.divIcon({
       className: "bg-transparent border-none z-[999]",
-      html: `<div class="w-3 h-3 rounded-full bg-emerald-600 border border-white shadow-sm"></div>`,
+      html: `<div class="w-3 h-3 rounded-full bg-purple-600 border border-white shadow-sm"></div>`,
       iconSize: [12, 12],
       iconAnchor: [6, 6],
     });
   }
 
-  // 2. Default State: Blinking/Pulsing effect
   return L.divIcon({
     className: "bg-transparent border-none z-[999]",
     html: `
-      <div class="relative flex h-7 w-7">
-        <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-        <span class="relative inline-flex rounded-full h-7 w-7 bg-emerald-500 text-white text-[10px] font-bold items-center justify-center shadow-lg ring-2 ring-emerald-200 transition-all duration-300">
+      <div class="relative flex h-6 w-6">
+        <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-purple-400 opacity-40"></span>
+        <span class="relative inline-flex rounded-full h-6 w-6 bg-purple-600/60 backdrop-blur-sm text-white text-[9px] font-bold items-center justify-center shadow-sm ring-1 ring-white/50 transition-all duration-300 hover:bg-purple-600/90">
           AI ${index + 1}
         </span>
       </div>
     `,
-    iconSize: [28, 28],
-    iconAnchor: [14, 14],
+    iconSize: [24, 24],
+    iconAnchor: [12, 12],
   });
 };
 
-function MapControlButtons({ userPoint, viewportCenter, viewportBounds, results, showLines, setShowLines }) {
+function MapControlButtons({ userPoint, viewportCenter, viewportBounds, results, showLines, setShowLines, hiddenAiPinsCount, onUnhideAll }) {
   const map = useMap();
 
   const handleShowUser = () => { if (userPoint) map.flyTo([userPoint.lat, userPoint.lng], map.getZoom()); };
+  
   const handleShowViewport = () => {
     if (viewportBounds) map.fitBounds(viewportBounds, { padding: [20, 20] });
     else if (viewportCenter) map.flyTo([viewportCenter.lat, viewportCenter.lng], 14);
   };
+  
   const handleShowAll = () => {
     const bounds = L.latLngBounds();
     if (userPoint) bounds.extend([userPoint.lat, userPoint.lng]);
@@ -73,6 +74,11 @@ function MapControlButtons({ userPoint, viewportCenter, viewportBounds, results,
 
   return (
     <div className="absolute top-3 right-3 z-[1000] flex gap-2">
+      {hiddenAiPinsCount > 0 && (
+        <button onClick={onUnhideAll} className="px-3 py-1.5 text-xs font-semibold text-white bg-slate-800 border border-slate-700 rounded shadow-md hover:bg-slate-700 flex items-center gap-1">
+          👁️ Unhide {hiddenAiPinsCount}
+        </button>
+      )}
       <button onClick={handleShowUser} className="px-3 py-1.5 text-xs font-semibold text-blue-600 bg-white border border-blue-300 rounded shadow-sm hover:bg-blue-50">Show User</button>
       <button onClick={handleShowViewport} className="px-3 py-1.5 text-xs font-semibold text-blue-600 bg-white border border-blue-300 rounded shadow-sm hover:bg-blue-50">Show Viewport</button>
       <button onClick={handleShowAll} className="px-3 py-1.5 text-xs font-semibold text-blue-600 bg-white border border-blue-300 rounded shadow-sm hover:bg-blue-50">Show All</button>
@@ -98,9 +104,10 @@ export default function MapPreview({
   const [isMasterLocked, setIsMasterLocked] = useState(false);
   const [baseError, setBaseError] = useState(0);
 
-  // New states for the AI overlay tools
   const [showAiPins, setShowAiPins] = useState(false);
   const [showRelevanceCircle, setShowRelevanceCircle] = useState(false);
+  
+  const [hiddenAiPins, setHiddenAiPins] = useState([]);
 
   const viewportCenter = parseLatLng(viewportCenterLatLng);
   const userPoint = parseLatLng(userLatLng);
@@ -128,10 +135,10 @@ export default function MapPreview({
     return discoveredPins;
   }, [aiResult]);
 
-  // Auto-show pins if AI generates them
   useEffect(() => {
     if (aiPins.length > 0) {
       setShowAiPins(true);
+      setHiddenAiPins([]);
     }
   }, [aiPins]);
 
@@ -194,9 +201,17 @@ export default function MapPreview({
 
       <MapContainer center={centerCoords} zoom={13} scrollWheelZoom={true} zoomControl={false} className="w-full h-full z-0">
         
-        <MapControlButtons userPoint={userPoint} viewportCenter={viewportCenter} viewportBounds={viewportBounds} results={results} showLines={showLines} setShowLines={setShowLines} />
+        <MapControlButtons 
+          userPoint={userPoint} 
+          viewportCenter={viewportCenter} 
+          viewportBounds={viewportBounds} 
+          results={results} 
+          showLines={showLines} 
+          setShowLines={setShowLines} 
+          hiddenAiPinsCount={hiddenAiPins.length}
+          onUnhideAll={() => setHiddenAiPins([])}
+        />
         
-        {/* New External Control Component */}
         <AiOverlayControls 
           hasAiData={aiPins.length > 0} 
           showAiPins={showAiPins} 
@@ -270,34 +285,57 @@ export default function MapPreview({
           );
         })}
 
-       {/* Toggled AI Discovered Real World Pins */}
-{showAiPins && aiPins.map((aiPin, index) => (
-  <Marker 
-    key={`ai-${index}`} 
-    position={[aiPin.point.lat, aiPin.point.lng]} 
-    icon={createAiIcon(index, activeAiPin === index)}
-    eventHandlers={{
-      click: () => setActiveAiPin(index),
-      popupclose: () => setActiveAiPin(null)
-    }}
-  >
-    <Popup className="min-w-[200px]">
-      <div className="text-xs font-bold text-emerald-700 border-b border-emerald-100 pb-1 mb-1 flex justify-between">
-        <span>AI Discovery {index + 1}</span>
-      </div>
-      <div className="text-xs font-bold text-slate-800">{aiPin.realWorldName}</div>
-      <div className="text-[10px] text-slate-600 mt-1">{aiPin.realWorldAddress}</div>
-      
-      {/* NEW: Coordinates View */}
-      <div className="text-[10px] font-mono text-slate-400 mt-1.5 pt-1.5 border-t border-slate-100 flex items-center gap-1">
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3 h-3 text-slate-300">
-          <path fillRule="evenodd" d="M9.69 18.933l.003.001C9.89 19.02 10 19 10 19s.11.02.308-.066l.002-.001.006-.003.018-.008a5.741 5.741 0 00.281-.14c.186-.096.446-.24.757-.433.62-.384 1.445-.966 2.274-1.765C15.302 14.988 17 12.493 17 9A7 7 0 103 9c0 3.492 1.698 5.988 3.355 7.584a13.731 13.731 0 002.273 1.765 11.842 11.842 0 00.976.544l.062.029.018.008.006.003zM10 11.25a2.25 2.25 0 100-4.5 2.25 2.25 0 000 4.5z" clipRule="evenodd" />
-        </svg>
-        {aiPin.point.lat.toFixed(6)}, {aiPin.point.lng.toFixed(6)}
-      </div>
-    </Popup>
-  </Marker>
-))}
+        {showAiPins && aiPins.map((aiPin, index) => {
+          if (hiddenAiPins.includes(index)) return null;
+
+          return (
+            <Marker 
+              key={`ai-${index}`} 
+              position={[aiPin.point.lat, aiPin.point.lng]} 
+              icon={createAiIcon(index, activeAiPin === index)}
+              eventHandlers={{
+                click: () => setActiveAiPin(index),
+                popupclose: () => setActiveAiPin(null)
+              }}
+            >
+              <Popup className="min-w-[200px]">
+                <div className="text-xs font-bold text-purple-700 border-b border-purple-100 pb-1 mb-1 flex justify-between items-center">
+                  <span>AI Discovery {index + 1}</span>
+                  <button 
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setHiddenAiPins(prev => [...prev, index]);
+                      setActiveAiPin(null);
+                    }}
+                    className="text-[9px] bg-red-50 text-red-600 px-1.5 py-0.5 rounded border border-red-200 hover:bg-red-100 transition-colors cursor-pointer"
+                  >
+                    Hide
+                  </button>
+                </div>
+                
+                <div className="text-xs font-bold text-slate-800">
+                  {aiPin.realWorldName || aiPin.name}
+                </div>
+                
+                {/* BULLETPROOF CATEGORY RENDERER */}
+                <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mt-0.5 mb-1">
+                  {aiPin.category || aiPin.realWorldCategory || aiPin.type || aiPin.storeType || "Verified Location"}
+                </div>
+                
+                <div className="text-[10px] text-slate-600 mt-1">
+                  {aiPin.realWorldAddress || aiPin.address}
+                </div>
+                
+                <div className="text-[10px] font-mono text-slate-400 mt-1.5 pt-1.5 border-t border-slate-100 flex items-center gap-1">
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3 h-3 text-slate-300">
+                    <path fillRule="evenodd" d="M9.69 18.933l.003.001C9.89 19.02 10 19 10 19s.11.02.308-.066l.002-.001.006-.003.018-.008a5.741 5.741 0 00.281-.14c.186-.096.446-.24.757-.433.62-.384 1.445-.966 2.274-1.765C15.302 14.988 17 12.493 17 9A7 7 0 103 9c0 3.492 1.698 5.988 3.355 7.584a13.731 13.731 0 002.273 1.765 11.842 11.842 0 00.976.544l.062.029.018.008.006.003zM10 11.25a2.25 2.25 0 100-4.5 2.25 2.25 0 000 4.5z" clipRule="evenodd" />
+                  </svg>
+                  {aiPin.point.lat.toFixed(6)}, {aiPin.point.lng.toFixed(6)}
+                </div>
+              </Popup>
+            </Marker>
+          );
+        })}
 
         {results.map((result, index) => {
           const point = parseLatLng(result.lat_lng || result.pinLatLng);
@@ -335,12 +373,6 @@ export default function MapPreview({
                     <input type="number" min="0.1" step="0.1" disabled={axisLocks.width} value={parseFloat(viewportDims.width).toFixed(1)} onChange={e => setViewportDims({ ...viewportDims, width: parseFloat(e.target.value) || 0.1 })} className={`w-14 px-1.5 py-0.5 border rounded text-xs text-right focus:outline-none ${axisLocks.width ? 'bg-slate-100 text-slate-400 border-transparent' : 'bg-white border-slate-300 focus:border-purple-500 text-slate-800'}`} />
                   </div>
                   <input type="range" min="0.1" max={maxSliderWidth} step="0.1" disabled={axisLocks.width} value={viewportDims.width} onChange={e => setViewportDims({ ...viewportDims, width: parseFloat(e.target.value) })} className={`w-full h-1.5 rounded-lg appearance-none cursor-pointer ${axisLocks.width ? 'bg-slate-200 accent-slate-400' : 'bg-slate-200 accent-purple-500'}`} />
-                  {!axisLocks.width && originalDims.hasData && isWidthMismatch && (
-                    <div className="flex justify-between items-center mt-2 pt-1.5 border-t border-amber-100">
-                      <span className="text-[9px] font-bold text-amber-600 flex items-center gap-1">⚠️ Differs from extracted data</span>
-                      <button onClick={() => setViewportDims(prev => ({ ...prev, width: originalDims.width }))} className="text-[9px] bg-amber-100 hover:bg-amber-200 text-amber-800 px-1.5 py-0.5 rounded font-bold">Reset</button>
-                    </div>
-                  )}
                 </div>
                 <div className={`border rounded p-2 transition-colors ${axisLocks.height ? 'bg-slate-50 border-slate-200' : 'bg-white border-purple-200 shadow-sm'}`}>
                   <div className="flex justify-between items-center text-[10px] text-slate-600 mb-1.5">
@@ -351,12 +383,6 @@ export default function MapPreview({
                     <input type="number" min="0.1" step="0.1" disabled={axisLocks.height} value={parseFloat(viewportDims.height).toFixed(1)} onChange={e => setViewportDims({ ...viewportDims, height: parseFloat(e.target.value) || 0.1 })} className={`w-14 px-1.5 py-0.5 border rounded text-xs text-right focus:outline-none ${axisLocks.height ? 'bg-slate-100 text-slate-400 border-transparent' : 'bg-white border-slate-300 focus:border-purple-500 text-slate-800'}`} />
                   </div>
                   <input type="range" min="0.1" max={maxSliderHeight} step="0.1" disabled={axisLocks.height} value={viewportDims.height} onChange={e => setViewportDims({ ...viewportDims, height: parseFloat(e.target.value) })} className={`w-full h-1.5 rounded-lg appearance-none cursor-pointer ${axisLocks.height ? 'bg-slate-200 accent-slate-400' : 'bg-slate-200 accent-purple-500'}`} />
-                  {!axisLocks.height && originalDims.hasData && isHeightMismatch && (
-                    <div className="flex justify-between items-center mt-2 pt-1.5 border-t border-amber-100">
-                      <span className="text-[9px] font-bold text-amber-600 flex items-center gap-1">⚠️ Differs from extracted data</span>
-                      <button onClick={() => setViewportDims(prev => ({ ...prev, height: originalDims.height }))} className="text-[9px] bg-amber-100 hover:bg-amber-200 text-amber-800 px-1.5 py-0.5 rounded font-bold">Reset</button>
-                    </div>
-                  )}
                 </div>
                 <button onClick={() => toggleMasterLock(true)} className="w-full mt-2 py-2 bg-green-500 hover:bg-green-600 text-white text-xs font-bold rounded shadow-sm transition-colors">Confirm & Lock Dimensions</button>
               </div>
@@ -370,6 +396,12 @@ export default function MapPreview({
           <div className="bg-amber-50 border border-amber-200 text-amber-800 px-4 py-2 rounded-lg text-sm shadow-lg pointer-events-auto">Viewport rectangle will appear after entering viewport center.</div>
         </div>
       )}
+      <AiRelevancePanel 
+        isOpen={showRelevanceCircle} 
+        onClose={() => setShowRelevanceCircle(false)} 
+        parsedTask={aiResult?.parsedData || { query: "Unknown Query" }} 
+        aiPins={aiPins}
+      />
     </div>
   );
 }

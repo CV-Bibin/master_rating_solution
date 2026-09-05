@@ -8,18 +8,45 @@ import { executeWithAutoHealing, delay } from "./aiClient";
 // BULLETPROOF JSON SAFE PARSER
 // ==========================================
 function cleanJsonResponse(rawText) {
+  // NEW: Defensively check if the input is a valid string
+  if (!rawText || typeof rawText !== "string") {
+    console.error("cleanJsonResponse received invalid text:", rawText);
+    return "{}"; // Return empty JSON object to prevent UI crashes
+  }
+
   try {
     let cleanedText = rawText.replace(/```json/gi, '').replace(/```/gi, '').trim();
     const startIndex = cleanedText.indexOf('{');
     const endIndex = cleanedText.lastIndexOf('}');
+    
     if (startIndex !== -1 && endIndex !== -1) {
       cleanedText = cleanedText.substring(startIndex, endIndex + 1);
     }
+    
     return cleanedText; 
   } catch (error) {
     console.error("Failed to clean AI JSON response:", error);
-    return rawText;
+    return "{}";
   }
+}
+
+// ==========================================
+// RECTANGLE BOUNDING BOX CALCULATOR
+// ==========================================
+function isInsideViewportRectangle(userLat, userLng, centerLat, centerLng, widthKm = 10, heightKm = 10) {
+  if (!userLat || !userLng || !centerLat || !centerLng) return null;
+  
+  // 1 degree of latitude is roughly 111.32 km
+  const latKmPerDegree = 111.32;
+  // 1 degree of longitude scales based on the latitude
+  const lngKmPerDegree = 111.32 * Math.cos(centerLat * (Math.PI / 180));
+
+  // Calculate distance from center along the X and Y axes
+  const latDiffKm = Math.abs(userLat - centerLat) * latKmPerDegree;
+  const lngDiffKm = Math.abs(userLng - centerLng) * lngKmPerDegree;
+
+  // It is inside the rectangle if it is within half the total width/height from the center
+  return latDiffKm <= (heightKm / 2) && lngDiffKm <= (widthKm / 2);
 }
 
 function getPathValue(data, path) {
@@ -55,8 +82,7 @@ function formatGuidelineLabel(guide) {
 function buildGuidelinesText(guidelines) {
   if (!guidelines.length) return "";
   return guidelines
-    .map((guide) => {
-      return `[PRIORITY ${guide.priority || 0}]
+    .map((guide) => `[PRIORITY ${guide.priority || 0}]
 GUIDELINE:
 ${formatGuidelineLabel(guide)}
 
@@ -73,14 +99,7 @@ PRINCIPLE / RULE TEXT:
 ${guide.principle || "No principle text provided."}
 
 EXPECTED AI OUTPUT:
-${guide.expectedOutput || "No specific output format provided."}
-
-RESEARCH POLICY:
-${guide.researchPolicy || "not_required"}
-
-RESEARCH INSTRUCTION:
-${guide.researchInstruction || "None"}`;
-    })
+${guide.expectedOutput || "No specific output format provided."}`)
     .join("\n\n");
 }
 
@@ -115,9 +134,28 @@ export async function runAiWorkflow(projectId, parsedTask) {
       .filter((guide) => guide.status !== "draft")
       .sort((a, b) => (b.priority || 0) - (a.priority || 0));
 
+    // ==========================================
+    // DYNAMIC VIEWPORT OVERRIDE (RECTANGLE MATH)
+    // ==========================================
+    let isUserInside = parsedTask.isUserInViewport;
+    const uMatch = parsedTask.userLatLng?.match(/(-?\d+\.\d+)[^\d-]+(-?\d+\.\d+)/);
+    const vMatch = parsedTask.viewportCenter?.match(/(-?\d+\.\d+)[^\d-]+(-?\d+\.\d+)/);
+
+    if (uMatch && vMatch) {
+      // Assuming a default 10km x 10km map viewport if explicit dimensions aren't provided
+      const userInsideRect = isInsideViewportRectangle(
+        parseFloat(uMatch[1]), parseFloat(uMatch[2]), 
+        parseFloat(vMatch[1]), parseFloat(vMatch[2]), 
+        10, 10 
+      );
+      
+      if (userInsideRect !== null) {
+        isUserInside = userInsideRect;
+      }
+    }
+    const userPhysicalStatus = isUserInside ? 'INSIDE VIEWPORT' : 'OUTSIDE VIEWPORT (FAIRLY FAR)';
+
     const stepOutputs = [];
-    
-    // Default context for Step 1
     let liveMapsContext = "Google Maps API pending extraction of Intent and Coordinates from Step 1...";
 
     for (const step of activeSteps) {
@@ -133,16 +171,14 @@ export async function runAiWorkflow(projectId, parsedTask) {
 You are an AI map quality rating assistant.
 
 SYSTEM RULES:
-- You are NOT parsing raw TryRating text.
-- The task was already extracted by local parser code.
 - Perform ONLY the current workflow step.
+- USER PHYSICAL POSITION OVERRIDE: The user is definitively ${userPhysicalStatus}. Base your logic on this exact physical status using strict rectangle bounding box math.
+- LINGUISTIC RULE (TRANSLATION VS TRANSLITERATION): If the user query is non-English, you MUST intelligently format the "sanitizedQuery". TRANSLATE generic categories to English (e.g., "zapatos" -> "shoes", "रेस्टोरेंट" -> "restaurant"). TRANSLITERATE brand names and local places into English characters without literal translation (e.g., "ಸ್ಟಾರ್ಬಕ್ಸ್" -> "Starbucks", "मैकडॉनल्ड्स" -> "McDonalds").
+- CATEGORY RETENTION RULE: If you output matched locations (e.g., topMatches or AI Pins), you MUST include a "category" field for each match by extracting the category provided in the LIVE GOOGLE MAPS API RESULTS below. Do not drop the category field.
 - Use ONLY the selected structured task inputs below.
 - Do NOT use candidate/result fields unless they appear in selected structured task inputs.
 - Do NOT evaluate candidate relevance unless this workflow step and selected guideline explicitly ask for it.
 - Do NOT produce a final rating unless this workflow step is a final rating step.
-- Do not invent missing facts.
-- If evidence is missing, clearly say what is missing.
-- If external research is required but no research tool/data is available, set researchNeeded to Yes instead of guessing.
 
 CURRENT WORKFLOW STEP:
 ${step.name || "Workflow Step"}
@@ -162,7 +198,6 @@ ${liveMapsContext}
 
 TASK:
 Follow only the selected guideline condition, diagnostic steps, principle, research policy, and expected AI output.
-
 Return only the result requested by this workflow step.
 `;
 
@@ -184,7 +219,6 @@ Return only the result requested by this workflow step.
         try {
           const parsedResult = JSON.parse(safeResult);
           
-          // Recursive scanner finds keys regardless of AI nesting depth
           const extractDeepValue = (obj, targetKey) => {
             if (!obj || typeof obj !== 'object') return null;
             if (targetKey in obj) return obj[targetKey];

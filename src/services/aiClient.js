@@ -69,11 +69,16 @@ export const executeWithAutoHealing = async (prompt, maxRetries = 8) => {
         };
       }
 
-      const response = await ai.models.generateContent({
+     const response = await ai.models.generateContent({
         model: currentModel,
         contents: prompt,
         config: apiConfig,
       });
+
+      // ADD THIS STRICT CHECK: Force a retry if the AI returns empty text
+      if (!response.text) {
+        throw new Error("AI returned an empty response (possible silent safety block).");
+      }
 
       // SUCCESS: Load balance by pointing to next key for the future
       currentClientIndex = (keyIndex + 1) % apiKeys.length;
