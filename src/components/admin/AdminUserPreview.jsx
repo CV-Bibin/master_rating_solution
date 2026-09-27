@@ -10,7 +10,7 @@ import {
 import { db } from "../../firebase";
 import { getTaskType, getTaskTypeOptions } from "../../taskTypes";
 import { runAiWorkflow } from "../../services/workflowEngine";
-import AiDraggableWindow from "./AiDraggableWindow"; // <--- Import the new component
+import AiDraggableWindow from "./AiDraggableWindow"; 
 
 function detectTaskTypeId(rawText) {
   const text = rawText.toLowerCase();
@@ -36,8 +36,10 @@ export default function AdminUserPreview({ projectId }) {
   const [isAskAiReady, setIsAskAiReady] = useState(false);
   const [manualViewportAge, setManualViewportAge] = useState(""); 
   
-  // NEW: State to track if the draggable window is visible
   const [showAiWindow, setShowAiWindow] = useState(false); 
+  
+  // NEW: State to catch the purple box coordinates from the map
+  const [mapViewportBounds, setMapViewportBounds] = useState(null);
 
   const taskTypeOptions = getTaskTypeOptions();
 
@@ -94,6 +96,7 @@ export default function AdminUserPreview({ projectId }) {
     setMatchedProject(null);
     setIsAskAiReady(false);
     setManualViewportAge(""); 
+    setMapViewportBounds(null); // Reset bounds on new extraction
 
     try {
       const nextTaskTypeId = detectTaskTypeId(rawTextData);
@@ -134,20 +137,33 @@ export default function AdminUserPreview({ projectId }) {
 
     const taskForAi = {
       ...parsedTask,
-      viewport_center_lat_lng: needsViewportCenter ? viewportCenterLatLng.trim() : null,
+      viewport_center_lat_lng: needsViewportCenter ? viewportCenterLatLng.trim() : parsedTask.viewport_center_lat_lng,
+      viewportBounds: mapViewportBounds || parsedTask.viewport_bounds || parsedTask.viewportBounds || null,
+      userLatLng: parsedTask.user_lat_lng || parsedTask.userLatLng || null
     };
+
+    console.log("Sending Payload to AI Engine:", taskForAi);
 
     setParsedTask(taskForAi);
     setAskingAi(true);
     setErrorMessage("");
 
+    // NEW: Open the window IMMEDIATELY in a loading state
+    setAiResult({ parsedData: taskForAi, steps: [], status: "running" });
+    setShowAiWindow(true); 
+
     try {
-      const result = await runAiWorkflow(activeProjectForAi.id, taskForAi);
-      setAiResult(result);
-      setShowAiWindow(true); // Open the draggable window when complete
+      // NEW: Pass the callback function to receive live step updates
+      const finalResult = await runAiWorkflow(activeProjectForAi.id, taskForAi, (incrementalData) => {
+        setAiResult(incrementalData);
+      });
+      
+      // Workflow is 100% complete
+      setAiResult(finalResult);
     } catch (error) {
       console.error("AI workflow failed:", error);
       setErrorMessage("AI workflow failed.");
+      setAiResult(prev => ({ ...prev, status: "error" }));
     } finally {
       setAskingAi(false);
     }
@@ -174,7 +190,6 @@ export default function AdminUserPreview({ projectId }) {
           </div>
 
           <div className="flex items-center gap-3">
-            {/* NEW: Unhide Button if result exists but window was closed */}
             {aiResult && !showAiWindow && (
               <button
                 onClick={() => setShowAiWindow(true)}
@@ -236,9 +251,9 @@ export default function AdminUserPreview({ projectId }) {
             onAskAiReadyChange={setIsAskAiReady}
             onViewportAgeChange={setManualViewportAge} 
             aiResult={aiResult}
+            onViewportBoundsChange={setMapViewportBounds} // <-- CATCHES THE PURPLE BOX FROM THE VIEWER
           />
           
-          {/* NEW: Render the draggable window on top of the Viewer */}
           {showAiWindow && aiResult && (
             <AiDraggableWindow 
               result={aiResult} 

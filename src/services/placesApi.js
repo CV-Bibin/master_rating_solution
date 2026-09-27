@@ -52,7 +52,7 @@ export async function searchNearbyPlaces(searchQuery, locationString = "") {
         'Content-Type': 'application/json',
         'X-Goog-Api-Key': apiKey,
         // Include category types in the FieldMask
-        'X-Goog-FieldMask': 'places.displayName,places.formattedAddress,places.location,places.primaryTypeDisplayName,places.types'
+        'X-Goog-FieldMask': 'places.displayName,places.formattedAddress,places.location,places.primaryTypeDisplayName,places.types,places.businessStatus'
       },
       body: JSON.stringify(requestBody)
     });
@@ -88,7 +88,7 @@ export async function searchNearbyPlaces(searchQuery, locationString = "") {
         address: place.formattedAddress || "No address provided",
         latLng: safeLatLng,
         distanceFromUser: safeDistance,
-        businessStatus: "OPERATIONAL",
+        businessStatus: place.businessStatus || "OPERATIONAL",
         rawDistance: distanceKm !== null ? distanceKm : 999, // Used for sorting
         lat: placeLat,
         lng: placeLng

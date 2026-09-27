@@ -72,32 +72,63 @@ export function estimateViewportDimensions(center, results = []) {
 
   if (validPoints.length === 0) return defaultDims;
 
-  let bestW = 1;
-  let bestH = 1;
-  let minError = Infinity;
-
-  for (let w = 0.1; w <= 30; w += 0.2) {
-    for (let h = 0.1; h <= 30; h += 0.2) {
-      let error = 0;
-      
-      for (const pt of validPoints) {
-        const dx_excess = Math.max(0, pt.dx - w);
-        const dy_excess = Math.max(0, pt.dy - h);
-        const calcDist = Math.sqrt(dx_excess * dx_excess + dy_excess * dy_excess);
-        error += Math.abs(calcDist - pt.targetDist);
-      }
-      
-      error += Math.abs(w - h) * 0.001; 
-
-      if (error < minError) {
-        minError = error;
-        bestW = w;
-        bestH = h;
-      }
-    }
+  // Find max distances to bound our initial search area
+  let maxDx = 0.1;
+  let maxDy = 0.1;
+  for (const pt of validPoints) {
+    if (pt.dx > maxDx) maxDx = pt.dx;
+    if (pt.dy > maxDy) maxDy = pt.dy;
   }
 
-  return { width: bestW, height: bestH, hasData: true };
+  // 3-Pass Precision Search to fix the 75-meter (0.075km) bug
+  // Pass 1: 500m steps (Coarse)
+  // Pass 2: 50m steps (Fine)
+  // Pass 3: 5m steps (Ultra-fine)
+  let searchW = Math.max(0.1, maxDx / 2);
+  let searchH = Math.max(0.1, maxDy / 2);
+  
+  const passes = [
+    { span: Math.max(20, maxDx * 2 + 5), step: 0.5 },
+    { span: 1.0, step: 0.05 },
+    { span: 0.1, step: 0.005 } // 5-meter precision
+  ];
+
+  for (const pass of passes) {
+    let bestLocalW = searchW;
+    let bestLocalH = searchH;
+    let minError = Infinity;
+
+    let startW = Math.max(0.005, searchW - pass.span / 2);
+    let endW = searchW + pass.span / 2;
+    let startH = Math.max(0.005, searchH - pass.span / 2);
+    let endH = searchH + pass.span / 2;
+
+    for (let w = startW; w <= endW; w += pass.step) {
+      for (let h = startH; h <= endH; h += pass.step) {
+        let error = 0;
+        
+        for (const pt of validPoints) {
+          const dx_excess = Math.max(0, pt.dx - w);
+          const dy_excess = Math.max(0, pt.dy - h);
+          const calcDist = Math.sqrt(dx_excess * dx_excess + dy_excess * dy_excess);
+          error += Math.abs(calcDist - pt.targetDist);
+        }
+        
+        // Tiny penalty to keep box somewhat square if multiple dimensions have identical error
+        error += Math.abs(w - h) * 0.0001; 
+
+        if (error < minError) {
+          minError = error;
+          bestLocalW = w;
+          bestLocalH = h;
+        }
+      }
+    }
+    searchW = bestLocalW;
+    searchH = bestLocalH;
+  }
+
+  return { width: searchW, height: searchH, hasData: true };
 }
 
 export function calculateBoundsFromDimensions(center, widthKm, heightKm) {

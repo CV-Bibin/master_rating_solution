@@ -10,6 +10,7 @@ import {
   orderBy,
   query,
   serverTimestamp,
+  updateDoc, // NEW: Added updateDoc for editing
   where,
 } from "firebase/firestore";
 import { db } from "../../firebase";
@@ -17,6 +18,7 @@ import { getTaskType } from "../../taskTypes";
 
 const STEP_SUGGESTIONS = [
   "Query Intent Diagnostic",
+  "Location Intent & Spatial Anchoring",
   "Location Intent Diagnostic",
   "Navigational Intent Check",
   "Expected Result Type Check",
@@ -33,7 +35,10 @@ export default function WorkflowStepsTab({ projectId }) {
   const [steps, setSteps] = useState([]);
   const [guidelines, setGuidelines] = useState([]);
   const [loading, setLoading] = useState(true);
+  
+  // Form States
   const [isAdding, setIsAdding] = useState(false);
+  const [editingStepId, setEditingStepId] = useState(null); // NEW: Tracks which step is being edited
   const [stepName, setStepName] = useState("");
   const [selectedInputKeys, setSelectedInputKeys] = useState([]);
   const [selectedGuidelineIds, setSelectedGuidelineIds] = useState([]);
@@ -155,7 +160,20 @@ export default function WorkflowStepsTab({ projectId }) {
     setSelectedGuidelineIds([]);
     setEnabled(true);
     setIsAdding(false);
+    setEditingStepId(null);
     setErrorMessage("");
+  };
+
+  // NEW: Populates the form with the selected step's data
+  const handleEdit = (step) => {
+    setStepName(step.name || "");
+    setSelectedInputKeys(step.requiredInputKeys || []);
+    setSelectedGuidelineIds(step.selectedGuidelineIds || []);
+    setEnabled(step.enabled !== false);
+    setEditingStepId(step.id);
+    setIsAdding(true);
+    // Smooth scroll to top of form
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
   const handleSave = async (event) => {
@@ -175,10 +193,7 @@ export default function WorkflowStepsTab({ projectId }) {
       selectedGuidelineIds.includes(guide.id)
     );
 
-    const nextOrder =
-      Math.max(0, ...steps.map((step) => Number(step.order) || 0)) + 1;
-
-    await addDoc(collection(db, "project_steps"), {
+    const stepData = {
       projectId,
       taskTypeId: taskTypeId || null,
       name: stepName.trim(),
@@ -187,12 +202,25 @@ export default function WorkflowStepsTab({ projectId }) {
       requiredInputKeys: selectedInputKeys,
       selectedGuidelineIds,
       selectedGuidelineLabels: selectedGuidelines.map(guidelineLabel),
-      order: nextOrder,
-      createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
-    });
+    };
 
-    resetForm();
+    try {
+      if (editingStepId) {
+        // UPDATE EXISTING STEP
+        await updateDoc(doc(db, "project_steps", editingStepId), stepData);
+      } else {
+        // ADD NEW STEP
+        const nextOrder = Math.max(0, ...steps.map((step) => Number(step.order) || 0)) + 1;
+        stepData.order = nextOrder;
+        stepData.createdAt = serverTimestamp();
+        await addDoc(collection(db, "project_steps"), stepData);
+      }
+      resetForm();
+    } catch (error) {
+      console.error("Save error:", error);
+      setErrorMessage("Failed to save step.");
+    }
   };
 
   const handleDelete = async (stepId) => {
@@ -239,7 +267,9 @@ export default function WorkflowStepsTab({ projectId }) {
       {isAdding && (
         <form onSubmit={handleSave} className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
           <div className="p-5 border-b border-slate-200 bg-slate-50">
-            <h4 className="font-bold text-slate-800">Create Workflow Step</h4>
+            <h4 className="font-bold text-slate-800">
+              {editingStepId ? "Edit Workflow Step" : "Create Workflow Step"}
+            </h4>
             <p className="text-sm text-slate-500 mt-1">
               The selected guideline controls the checklist, rules, research policy, and expected AI output.
             </p>
@@ -280,13 +310,6 @@ export default function WorkflowStepsTab({ projectId }) {
                   />
                   Step enabled
                 </label>
-              </div>
-
-              <div className="mt-6 bg-slate-50 border border-slate-200 rounded-xl p-4">
-                <h5 className="text-sm font-bold text-slate-800">How this works</h5>
-                <p className="text-sm text-slate-600 mt-2">
-                  Workflow step only controls order and selection. The guideline contains the actual condition, checklist, principle, research rule, and output format.
-                </p>
               </div>
             </div>
 
@@ -361,9 +384,6 @@ export default function WorkflowStepsTab({ projectId }) {
                           <p className="text-sm font-semibold text-slate-800">
                             {guidelineLabel(guide)}
                           </p>
-                          <p className="text-xs text-slate-500 mt-1">
-                            {guide.topic || "No Topic"} · Priority {guide.priority || 0}
-                          </p>
                           <p className="text-xs text-slate-500 mt-1 line-clamp-2">
                             {guide.condition || "No condition"}
                           </p>
@@ -395,7 +415,7 @@ export default function WorkflowStepsTab({ projectId }) {
               type="submit"
               className="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg"
             >
-              Save Step
+              {editingStepId ? "Update Step" : "Save Step"}
             </button>
           </div>
         </form>
@@ -451,12 +471,21 @@ export default function WorkflowStepsTab({ projectId }) {
                   </div>
                 </div>
 
-                <button
-                  onClick={() => handleDelete(step.id)}
-                  className="self-start px-3 py-1.5 text-sm font-medium rounded-md bg-red-50 text-red-600 hover:bg-red-100"
-                >
-                  Delete
-                </button>
+                {/* NEW: Edit and Delete Buttons Container */}
+                <div className="flex flex-col gap-2 self-start">
+                  <button
+                    onClick={() => handleEdit(step)}
+                    className="px-3 py-1.5 text-sm font-medium rounded-md bg-blue-50 text-blue-600 hover:bg-blue-100"
+                  >
+                    Edit
+                  </button>
+                  <button
+                    onClick={() => handleDelete(step.id)}
+                    className="px-3 py-1.5 text-sm font-medium rounded-md bg-red-50 text-red-600 hover:bg-red-100"
+                  >
+                    Delete
+                  </button>
+                </div>
               </div>
             ))}
           </div>
