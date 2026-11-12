@@ -4,12 +4,14 @@ function getDistanceInKm(lat1, lon1, lat2, lon2) {
   const R = 6371;
   const dLat = (lat2 - lat1) * (Math.PI / 180);
   const dLon = (lon2 - lon1) * (Math.PI / 180);
-  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + 
+            Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) * 
+            Math.sin(dLon / 2) * Math.sin(dLon / 2);
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c;
 }
 
-export async function searchNearbyPlaces(searchQuery, locationString = "") {
+export async function searchNearbyPlaces(searchQuery, locationString = "", intentData = null) {
   if (!searchQuery) return [];
 
   const keysString = import.meta.env.VITE_GMAPS_API_KEYS;
@@ -29,10 +31,26 @@ export async function searchNearbyPlaces(searchQuery, locationString = "") {
     anchorLng = parseFloat(coordsMatch[2]);
   }
 
-  // Keep the text query clean. Do NOT append raw coordinate strings to it.
-  const cleanQuery = searchQuery.trim();
-  const url = 'https://places.googleapis.com/v1/places:searchText';
+  let cleanQuery = searchQuery.trim();
+  let searchRadius = 15000; // Default 15km radius
 
+  // ==========================================================
+  // SMART QUERY ADJUSTMENT: ONLY FOR CHAIN/CATEGORY + LOCATION MODIFIER
+  // ==========================================================
+  if (intentData) {
+    const qType = (intentData.queryType || intentData.QueryType || "").toLowerCase();
+    
+    // Check if it is a Chain, Category, or Business
+    const isChainOrCategory = qType.includes("chain") || qType.includes("category") || qType.includes("business");
+
+    // If workflowEngine successfully stripped the city from the string, expand the radius to 50km!
+    // (cleanQuery is now just the brand, e.g., "KFC")
+    if (isChainOrCategory && intentData.isLocationStripped) {
+      searchRadius = 50000;
+    }
+  }
+
+  const url = 'https://places.googleapis.com/v1/places:searchText';
   const requestBody = { textQuery: cleanQuery };
 
   // Pass coordinates explicitly into locationBias so Google prioritizes true proximity
@@ -40,7 +58,7 @@ export async function searchNearbyPlaces(searchQuery, locationString = "") {
     requestBody.locationBias = {
       circle: {
         center: { latitude: anchorLat, longitude: anchorLng },
-        radius: 15000 // 15km radius to target truly local results first
+        radius: searchRadius
       }
     };
   }
@@ -71,6 +89,7 @@ export async function searchNearbyPlaces(searchQuery, locationString = "") {
         distanceKm = getDistanceInKm(anchorLat, anchorLng, placeLat, placeLng);
       }
 
+      // Keep the hard limit consistent with Step 2 rules
       if (distanceKm !== null && distanceKm > 50) continue;
 
       const safeDistance = distanceKm !== null ? `${distanceKm.toFixed(2)} km` : "Distance unavailable";

@@ -263,7 +263,7 @@ Return only the result requested by this workflow step.
         });
       }
 
-      // ==========================================
+     // ==========================================
       // AGGRESSIVE API TRIGGER: RUNS AFTER STEP 1
       // ==========================================
       if (stepOutputs.length === 1) {
@@ -272,7 +272,8 @@ Return only the result requested by this workflow step.
           
           const extractDeepValue = (obj, targetKey) => {
             if (!obj || typeof obj !== 'object') return null;
-            if (targetKey in obj) return obj[targetKey];
+            const foundKey = Object.keys(obj).find(k => k.toLowerCase() === targetKey.toLowerCase());
+            if (foundKey) return obj[foundKey];
             for (const key of Object.keys(obj)) {
               const result = extractDeepValue(obj[key], targetKey);
               if (result) return result;
@@ -284,9 +285,31 @@ Return only the result requested by this workflow step.
           const rawCoords = extractDeepValue(parsedResult, 'anchorCoordinates') || parsedTask.viewportCenter || parsedTask.userLatLng;
           const ac = String(rawCoords);
 
-          console.log(`🌍 Triggering Live API Search for Step 2 | Query: "${sq}" | Anchor: [${ac}]`);
+          // GET THE QUERY TYPE FROM STEP 1
+          const qType = (extractDeepValue(parsedResult, 'queryType') || extractDeepValue(parsedResult, 'QueryType') || "").toLowerCase();
+          const isChainOrCategory = qType.includes("chain") || qType.includes("category") || qType.includes("business");
+
+          const cityName = extractDeepValue(parsedResult, 'boundaryHighlight') || 
+                           extractDeepValue(parsedResult, 'expectedUserResultOrigin') || 
+                           extractDeepValue(parsedResult, 'explicitLocationModifier');
           
-          const liveMapsData = await searchNearbyPlaces(sq, ac);
+          let apiSearchString = sq;
+
+          // ==========================================
+          // THE LOCK: ONLY STRIP IF IT'S A CHAIN OR CATEGORY
+          // ==========================================
+          if (isChainOrCategory && cityName && typeof cityName === 'string') {
+            const cityRegex = new RegExp(cityName, 'gi');
+            apiSearchString = apiSearchString.replace(cityRegex, '').trim();
+            
+            // Pass flag to placesApi so it knows we safely stripped it
+            parsedResult.isLocationStripped = true; 
+          }
+
+          console.log(`🌍 Triggering Live API Search for Step 2 | Core Brand: "${apiSearchString}" (Original: "${sq}") | Anchor: [${ac}]`);
+          
+          const liveMapsData = await searchNearbyPlaces(apiSearchString, ac, parsedResult);
+          
           liveMapsContext = liveMapsData.length > 0 
             ? JSON.stringify(liveMapsData, null, 2) 
             : "No locations found in Google Maps within the 50km radius.";

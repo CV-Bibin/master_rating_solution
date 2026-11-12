@@ -72,15 +72,34 @@ const createAiIcon = (index, isActive, isSpillover) => {
 };
 
 // NEW: Helper component to smoothly pan the camera to the clicked pin
-function MapCameraController({ activeAiPin, aiPins }) {
+// Helper component to smoothly pan the camera to the clicked pin
+function MapCameraController({ activeAiPin, aiPins, activeResultIndex, results }) {
   const map = useMap();
+  
+  // 1. Pan to AI Pin when clicked in the LEFT sidebar
   useEffect(() => {
     if (activeAiPin !== null && aiPins[activeAiPin]?.point) {
       const pt = aiPins[activeAiPin].point;
-      // Using panTo instead of flyTo makes scroll-spy highlighting much smoother
       map.panTo([pt.lat, pt.lng], { animate: true, duration: 0.4 });
     }
   }, [activeAiPin, aiPins, map]);
+
+  // 2. Pan to Ground Truth Result when clicked in the RIGHT sidebar
+  useEffect(() => {
+    if (activeResultIndex !== null && activeResultIndex !== undefined && results && results[activeResultIndex]) {
+      // Parse coordinates (checks multiple possible property names just in case)
+      const pt = parseLatLng(
+        results[activeResultIndex].lat_lng || 
+        results[activeResultIndex].pinLatLng || 
+        results[activeResultIndex].latLng
+      );
+      
+      if (pt) {
+        map.panTo([pt.lat, pt.lng], { animate: true, duration: 0.4 });
+      }
+    }
+  }, [activeResultIndex, results, map]);
+
   return null;
 }
 
@@ -128,7 +147,8 @@ export default function MapPreview({
   viewportAge,
   onViewportLockChange,
   aiResult,
-  onViewportBoundsChange
+  onViewportBoundsChange,
+  activeResultIndex = null
 }) {
   const [mapType, setMapType] = useState("standard");
   const [activeAiPin, setActiveAiPin] = useState(null);
@@ -147,6 +167,7 @@ export default function MapPreview({
   const sidebarListRef = useRef(null);
   const sidebarItemRefs = useRef([]);
   const markerRefs = useRef([]);
+  const resultMarkerRefs = useRef([]);
 
   const viewportCenter = parseLatLng(viewportCenterLatLng);
   const userPoint = parseLatLng(userLatLng);
@@ -238,6 +259,13 @@ export default function MapPreview({
       setHiddenAiPins(autoHiddenIndices);
     }
   }, [aiPins]);
+
+  // Open the popup when a result is clicked in the right sidebar
+  useEffect(() => {
+    if (activeResultIndex !== null && activeResultIndex !== undefined && resultMarkerRefs.current[activeResultIndex]) {
+      resultMarkerRefs.current[activeResultIndex].openPopup();
+    }
+  }, [activeResultIndex]);
 
   // ==========================================
   // SCROLL SPY LOGIC (Intersection Observer)
@@ -691,14 +719,50 @@ export default function MapPreview({
           });
         })()}
 
+      {/* REAL-WORLD RESULTS MARKERS */}
         {results.map((result, index) => {
           const point = parseLatLng(result.lat_lng || result.pinLatLng);
           if (!point) return null;
+          
           return (
-            <Marker key={index} position={[point.lat, point.lng]} icon={createResultIcon(index)}>
-              <Popup>
-                <div className="text-xs font-bold">{result.name}</div>
-                <div className="text-[10px] text-slate-500 mt-1">{result.category}</div>
+            <Marker 
+              key={`result-${index}`} 
+              position={[point.lat, point.lng]} 
+              icon={createResultIcon(index)}
+              ref={(el) => resultMarkerRefs.current[index] = el} // Attach the ref so we can open it!
+            >
+              <Popup className="min-w-[220px]">
+                {/* Result Title Bar */}
+                <div className="text-xs font-bold text-sky-600 border-b border-sky-100 pb-1 mb-1.5 uppercase tracking-wide">
+                  Ground Truth {index + 1}
+                </div>
+                
+                {/* Name */}
+                <div className="text-sm font-bold text-slate-800 leading-tight">
+                  {result.name || result.title || "Unknown Location"}
+                </div>
+                
+                {/* Category */}
+                {(result.category || result.type) && (
+                  <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mt-0.5 mb-1.5">
+                    {result.category || result.type}
+                  </div>
+                )}
+                
+                {/* Address */}
+                {result.address && (
+                  <div className="text-[11px] text-slate-600 mt-1 leading-snug">
+                    {result.address}
+                  </div>
+                )}
+                
+                {/* Coordinates */}
+                <div className="text-[10px] font-mono text-slate-400 mt-2 pt-1.5 border-t border-slate-100 flex items-center gap-1.5">
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3 h-3 text-sky-400 shrink-0">
+                    <path fillRule="evenodd" d="M9.69 18.933l.003.001C9.89 19.02 10 19 10 19s.11.02.308-.066l.002-.001.006-.003.018-.008a5.741 5.741 0 00.281-.14c.186-.096.446-.24.757-.433.62-.384 1.445-.966 2.274-1.765C15.302 14.988 17 12.493 17 9A7 7 0 103 9c0 3.492 1.698 5.988 3.355 7.584a13.731 13.731 0 002.273 1.765 11.842 11.842 0 00.976.544l.062.029.018.008.006.003zM10 11.25a2.25 2.25 0 100-4.5 2.25 2.25 0 000 4.5z" clipRule="evenodd" />
+                  </svg>
+                  {point.lat.toFixed(6)}, {point.lng.toFixed(6)}
+                </div>
               </Popup>
             </Marker>
           );

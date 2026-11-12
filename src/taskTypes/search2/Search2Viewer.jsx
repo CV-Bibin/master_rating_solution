@@ -32,13 +32,21 @@ function FieldRow({ label, value }) {
   );
 }
 
-function ResultCard({ result, index }) {
+// PASSED THE ONCLICK HANDLER DOWN TO THE CARD
+function ResultCard({ result, index, isActive, onClick }) {
   const color = RESULT_COLORS[index % RESULT_COLORS.length];
 
   return (
-    <section className="border border-slate-200 rounded-lg overflow-hidden bg-white shadow-sm">
-      <div className={`${color} text-white px-4 py-2 text-sm font-bold`}>
-        {result.rank || index + 1}. {result.name || "Unnamed Result"}
+    <section 
+      className={`border ${isActive ? 'border-sky-400 ring-2 ring-sky-200 shadow-md' : 'border-slate-200 shadow-sm'} rounded-lg overflow-hidden bg-white transition-all duration-200`}
+    >
+      {/* THIS IS THE CLICKABLE HEADER */}
+      <div 
+        onClick={onClick}
+        className={`${color} text-white px-4 py-2 text-sm font-bold cursor-pointer hover:brightness-110 transition-all flex justify-between items-center`}
+      >
+        <span>{result.rank || index + 1}. {result.name || "Unnamed Result"}</span>
+        <span className="text-[10px] opacity-75 font-normal tracking-wider uppercase bg-black/10 px-1.5 py-0.5 rounded">View on Map</span>
       </div>
 
       <FieldRow label="Address" value={result.address} />
@@ -64,6 +72,9 @@ export default function Search2Viewer({
 }) {
   const [viewportAge, setViewportAge] = useState("");
   const [isViewportLocked, setIsViewportLocked] = useState(false); 
+  
+  // NEW: State to track which right-sidebar result was clicked
+  const [activeSidebarResult, setActiveSidebarResult] = useState(null);
 
   const viewportCenter = globalViewportCenter || "";
 
@@ -117,6 +128,7 @@ export default function Search2Viewer({
             onViewportLockChange={setIsViewportLocked}
             onViewportBoundsChange={onViewportBoundsChange}
             aiResult={aiResult} 
+            activeResultIndex={activeSidebarResult} // NEW: Pass the active result down to the map
           />
         </div>
 
@@ -191,6 +203,8 @@ export default function Search2Viewer({
                   key={`${result.rank || index}-${result.name || "card"}`}
                   result={result}
                   index={index}
+                  isActive={activeSidebarResult === index} // NEW: Highlight if active
+                  onClick={() => setActiveSidebarResult(index === activeSidebarResult ? null : index)} // NEW: Trigger click
                 />
               ))}
 
