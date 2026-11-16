@@ -44,7 +44,7 @@ function ResultCard({ result, index, isActive, onClick }) {
   return (
     <div className={`border ${isActive ? 'border-sky-400 ring-2 ring-sky-200 shadow-md' : 'border-slate-200 shadow-sm'} rounded-lg overflow-hidden bg-white transition-all duration-200`}>
       {/* CLICKABLE HEADER */}
-      <div 
+      <div
         onClick={onClick}
         className={`${headerColor} text-white px-3 py-2 text-sm font-bold flex justify-between items-center cursor-pointer hover:brightness-110 transition-all`}
       >
@@ -135,14 +135,15 @@ export default function SearchResultsPreview({ parsedSample }) {
           {/* MOCK PINS */}
           {results.map((result, index) => {
             const isActive = activeIndex === index;
-            
+
             return (
               <div
                 key={`${result.rank || index}-${result.name || "result"}`}
                 className={`absolute transition-all duration-300 ${isActive ? 'z-50 scale-110' : 'z-10'}`}
+                
                 style={{
-                  left: `${18 + (index * 27) % 68}%`,
-                  top: `${70 - (index * 19) % 52}%`,
+                  left: `${18 + ((index * 27) % 68)}%`,
+                  top: `${70 - ((index * 19) % 52)}%`,
                 }}
               >
                 {/* Custom CSS Popup when Active */}
@@ -178,13 +179,13 @@ export default function SearchResultsPreview({ parsedSample }) {
                 )}
 
                 {/* The Pin Itself */}
-                <div 
+                <div
                   onClick={() => setActiveIndex(isActive ? null : index)}
                   className={`w-7 h-7 mx-auto rounded-full ${isActive ? 'bg-sky-500' : 'bg-blue-500'} text-white text-xs font-bold flex items-center justify-center shadow-lg ring-2 ring-white cursor-pointer hover:scale-110 transition-transform`}
                 >
                   {result.rank || index + 1}
                 </div>
-                
+
                 {/* The Label below the Pin */}
                 <div className="mt-1 text-[10px] font-semibold text-slate-800 bg-white/90 backdrop-blur-sm px-1.5 py-0.5 rounded shadow-sm max-w-28 truncate text-center mx-auto">
                   {result.name || "Result"}

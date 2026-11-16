@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useMemo, useCallback } from "react";
-import { Circle, Rectangle, useMap } from "react-leaflet";
+import { Circle, Rectangle, Polygon, useMap } from "react-leaflet";
 import L from "leaflet";
 
 function getDistanceKm(lat1, lon1, lat2, lon2) {
@@ -8,6 +8,52 @@ function getDistanceKm(lat1, lon1, lat2, lon2) {
   const dLon = (lon2 - lon1) * (Math.PI / 180);
   const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) * Math.sin(dLon / 2) ** 2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+// 🚀 SCENARIO 4 HELPER 1: Shortest distance from a point to the outer wall/corner of the Viewport Rectangle (in meters)
+function getDistanceToBoxEdgeMeters(lat, lng, minLat, maxLat, minLng, maxLng) {
+  if (lat >= minLat && lat <= maxLat && lng >= minLng && lng <= maxLng) {
+    return 0; // Strictly inside the viewport rectangle
+  }
+  const clampedLat = Math.max(minLat, Math.min(lat, maxLat));
+  const clampedLng = Math.max(minLng, Math.min(lng, maxLng));
+  return getDistanceKm(lat, lng, clampedLat, clampedLng) * 1000;
+}
+
+// 🚀 SCENARIO 4 HELPER 2: Builds a rounded-rectangle buffer zone strictly `bufferMeters` outside all 4 walls and 4 corners
+function createRoundedBoxPolygon(viewportBounds, bufferMeters, cornerSegments = 16) {
+  if (!viewportBounds || viewportBounds.length !== 2 || bufferMeters <= 0) return [];
+
+  const minLat = Math.min(viewportBounds[0][0], viewportBounds[1][0]);
+  const maxLat = Math.max(viewportBounds[0][0], viewportBounds[1][0]);
+  const minLng = Math.min(viewportBounds[0][1], viewportBounds[1][1]);
+  const maxLng = Math.max(viewportBounds[0][1], viewportBounds[1][1]);
+
+  const centerLat = (minLat + maxLat) / 2;
+  const metersPerDegLat = 111320;
+  const metersPerDegLng = 111320 * Math.cos((centerLat * Math.PI) / 180);
+
+  const dLat = bufferMeters / metersPerDegLat;
+  const dLng = bufferMeters / metersPerDegLng;
+
+  const corners = [
+    { lat: maxLat, lng: maxLng, startAngle: 0, endAngle: Math.PI / 2 },                 // Top-Right (NE)
+    { lat: maxLat, lng: minLng, startAngle: Math.PI / 2, endAngle: Math.PI },           // Top-Left (NW)
+    { lat: minLat, lng: minLng, startAngle: Math.PI, endAngle: (3 * Math.PI) / 2 },     // Bottom-Left (SW)
+    { lat: minLat, lng: maxLng, startAngle: (3 * Math.PI) / 2, endAngle: 2 * Math.PI }, // Bottom-Right (SE)
+  ];
+
+  const ring = [];
+  corners.forEach(({ lat, lng, startAngle, endAngle }) => {
+    for (let i = 0; i <= cornerSegments; i++) {
+      const theta = startAngle + ((endAngle - startAngle) * i) / cornerSegments;
+      const ptLat = lat + dLat * Math.sin(theta);
+      const ptLng = lng + dLng * Math.cos(theta);
+      ring.push([ptLat, ptLng]);
+    }
+  });
+
+  return ring;
 }
 
 // 🚀 NATIVE POLYGON RENDERER
@@ -283,7 +329,9 @@ export default function DistanceDemotionZones({
   }
 
   // ==========================================
-  // SCENARIO 4: FRESH VIEWPORT, USER OUTSIDE
+  // SCENARIO 4: FRESH VIEWPORT, USER OUTSIDE (UPDATED)
+  // Measures distance strictly from the outer viewport wall/corners and draws
+  // rounded-rectangle buffer zones completely outside all 4 corners of the viewport!
   // ==========================================
   if (viewportStatusStr.includes("FRESH") && viewportStatusStr.includes("OUTSIDE") && viewportBounds && vpCenter) {
     const minLat = Math.min(viewportBounds[0][0], viewportBounds[1][0]);
@@ -292,7 +340,7 @@ export default function DistanceDemotionZones({
     const maxLng = Math.max(viewportBounds[0][1], viewportBounds[1][1]);
 
     let hasInsideResults = false;
-    const outsideDistances = [];
+    const outsideWallDistances = [];
 
     aiPins.forEach((pin, index) => {
       if (hiddenAiPins.includes(index)) return;
@@ -311,40 +359,59 @@ export default function DistanceDemotionZones({
       }
 
       if (ptLat !== null && ptLng !== null && !isNaN(ptLat)) {
-        if (ptLat >= minLat && ptLat <= maxLat && ptLng >= minLng && ptLng <= maxLng) {
+        const edgeDistMeters = getDistanceToBoxEdgeMeters(
+          parseFloat(ptLat),
+          parseFloat(ptLng),
+          minLat,
+          maxLat,
+          minLng,
+          maxLng
+        );
+
+        if (edgeDistMeters === 0) {
           hasInsideResults = true;
         } else {
-          outsideDistances.push(getDistanceKm(vpCenter[0], vpCenter[1], ptLat, ptLng) * 1000);
+          outsideWallDistances.push(edgeDistMeters);
         }
       }
     });
 
-    outsideDistances.sort((a, b) => a - b);
+    outsideWallDistances.sort((a, b) => a - b);
 
     if (hasInsideResults) {
-      const r2 = outsideDistances.length > 0 ? outsideDistances[0] * 1.10 : 2000;
-      const nextR3 = outsideDistances.find(d => d > r2);
+      // r2 = 1st buffer outside the viewport walls (Good / Demote by 1)
+      // r3 = 2nd buffer outside the viewport walls (Acceptable / Demote by 2)
+      const r2 = outsideWallDistances.length > 0 ? outsideWallDistances[0] * 1.10 : 2000;
+      const nextR3 = outsideWallDistances.find(d => d > r2);
       const r3 = nextR3 ? nextR3 * 1.10 : r2 * 1.5;
+
+      const r3Ring = createRoundedBoxPolygon(viewportBounds, r3);
+      const r2Ring = createRoundedBoxPolygon(viewportBounds, r2);
 
       return (
         <>
-          <Circle center={vpCenter} radius={r3} pathOptions={{ color: "#f97316", fillColor: "#ea580c", fillOpacity: 0.08, weight: 1.5, dashArray: "6 6" }} />
-          <Circle center={vpCenter} radius={r2} pathOptions={{ color: "#eab308", fillColor: "#facc15", fillOpacity: 0.12, weight: 2, dashArray: "6 6" }} />
+          <Polygon positions={r3Ring} pathOptions={{ color: "#f97316", fillColor: "#ea580c", fillOpacity: 0.08, weight: 1.5, dashArray: "6 6" }} />
+          <Polygon positions={r2Ring} pathOptions={{ color: "#eab308", fillColor: "#facc15", fillOpacity: 0.12, weight: 2, dashArray: "6 6" }} />
           <Rectangle bounds={viewportBounds} pathOptions={{ color: "#16a34a", fillColor: "#22c55e", fillOpacity: 0.25, weight: 3 }} />
         </>
       );
     } else {
-      const r1 = outsideDistances.length > 0 ? outsideDistances[0] * 1.10 : 2000;
-      const nextR2 = outsideDistances.find(d => d > r1);
+      // No results inside viewport: r1 (Excellent), r2 (Good), r3 (Acceptable) all wrap outside the viewport walls
+      const r1 = outsideWallDistances.length > 0 ? outsideWallDistances[0] * 1.10 : 2000;
+      const nextR2 = outsideWallDistances.find(d => d > r1);
       const r2 = nextR2 ? nextR2 * 1.10 : r1 * 1.5;
-      const nextR3 = outsideDistances.find(d => d > r2);
+      const nextR3 = outsideWallDistances.find(d => d > r2);
       const r3 = nextR3 ? nextR3 * 1.10 : r2 * 1.5;
+
+      const r3Ring = createRoundedBoxPolygon(viewportBounds, r3);
+      const r2Ring = createRoundedBoxPolygon(viewportBounds, r2);
+      const r1Ring = createRoundedBoxPolygon(viewportBounds, r1);
 
       return (
         <>
-          <Circle center={vpCenter} radius={r3} pathOptions={{ color: "#f97316", fillColor: "#ea580c", fillOpacity: 0.08, weight: 1.5, dashArray: "6 6" }} />
-          <Circle center={vpCenter} radius={r2} pathOptions={{ color: "#eab308", fillColor: "#facc15", fillOpacity: 0.12, weight: 2, dashArray: "6 6" }} />
-          <Circle center={vpCenter} radius={r1} pathOptions={{ color: "#22c55e", fillColor: "#22c55e", fillOpacity: 0.08, weight: 2.5, dashArray: "5 5" }} />
+          <Polygon positions={r3Ring} pathOptions={{ color: "#f97316", fillColor: "#ea580c", fillOpacity: 0.08, weight: 1.5, dashArray: "6 6" }} />
+          <Polygon positions={r2Ring} pathOptions={{ color: "#eab308", fillColor: "#facc15", fillOpacity: 0.12, weight: 2, dashArray: "6 6" }} />
+          <Polygon positions={r1Ring} pathOptions={{ color: "#22c55e", fillColor: "#22c55e", fillOpacity: 0.08, weight: 2.5, dashArray: "5 5" }} />
           <Rectangle bounds={viewportBounds} pathOptions={{ color: "#000000", fill: false, weight: 2, dashArray: "4 6", opacity: 0.4 }} />
         </>
       );

@@ -1,3 +1,4 @@
+// src/components/taskViewers/MapPreview.jsx
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { MapContainer, TileLayer, Marker, Popup, Rectangle, Polyline, Tooltip, useMap, ZoomControl } from "react-leaflet";
 import L from "leaflet";
@@ -5,7 +6,14 @@ import "leaflet/dist/leaflet.css";
 import { parseLatLng, estimateViewportDimensions, calculateBoundsFromDimensions, getDistanceKm, calculateViewportError } from "../../utils/viewportEstimator";
 import AiOverlayControls from "./AiOverlayControls";
 import DistanceDemotionZones from "../DistanceDemotionZones";
+import { runStep3FinalEvaluation, computeExactMapCircles } from "../../services/workflowEngine";
 
+// Shared bridge so AiDraggableWindow can also trigger Step 3 with MapPreview's exact unhidden pins
+export const mapStep3Bridge = {
+  triggerStep3: null,
+  unhiddenCount: 0,
+  liveCircles: null,
+};
 
 const RESULT_COLORS = ["bg-violet-500", "bg-sky-500", "bg-emerald-500", "bg-yellow-500", "bg-orange-500"];
 
@@ -23,10 +31,7 @@ const createResultIcon = (index) => {
     className: "bg-transparent border-none z-[800]",
     html: `
       <div class="relative flex h-9 w-9 items-center justify-center group transition-transform hover:scale-110">
-        <!-- Rotating Dashed Ring Animation -->
         <div class="absolute inset-0 rounded-full border-[2.5px] border-dashed border-slate-700 animate-[spin_4s_linear_infinite] opacity-70"></div>
-        
-        <!-- Static Inner Circle -->
         <div class="relative w-6 h-6 rounded-full ${color} text-xs font-bold flex items-center justify-center shadow-md ring-2 ring-white z-10">
           ${index + 1}
         </div>
@@ -37,12 +42,10 @@ const createResultIcon = (index) => {
   });
 };
 
-// UPGRADED: Active pin is prominent when selected from the sidebar
 const createAiIcon = (index, isActive, isSpillover) => {
-  // If flagged as a spillover (gray) pin
   const bgClass = isSpillover
-    ? 'bg-slate-500/80 hover:bg-slate-600' // Gray for nearby/spillover
-    : 'bg-purple-600/60 hover:bg-purple-600/90'; // Purple for primary
+    ? 'bg-slate-500/80 hover:bg-slate-600'
+    : 'bg-purple-600/60 hover:bg-purple-600/90';
 
   const pingClass = isSpillover ? 'bg-slate-400' : 'bg-purple-400';
   const ringClass = isSpillover ? 'ring-slate-300/50' : 'ring-white/50';
@@ -71,12 +74,9 @@ const createAiIcon = (index, isActive, isSpillover) => {
   });
 };
 
-// NEW: Helper component to smoothly pan the camera to the clicked pin
-// Helper component to smoothly pan the camera to the clicked pin
 function MapCameraController({ activeAiPin, aiPins, activeResultIndex, results }) {
   const map = useMap();
   
-  // 1. Pan to AI Pin when clicked in the LEFT sidebar
   useEffect(() => {
     if (activeAiPin !== null && aiPins[activeAiPin]?.point) {
       const pt = aiPins[activeAiPin].point;
@@ -84,16 +84,13 @@ function MapCameraController({ activeAiPin, aiPins, activeResultIndex, results }
     }
   }, [activeAiPin, aiPins, map]);
 
-  // 2. Pan to Ground Truth Result when clicked in the RIGHT sidebar
   useEffect(() => {
     if (activeResultIndex !== null && activeResultIndex !== undefined && results && results[activeResultIndex]) {
-      // Parse coordinates (checks multiple possible property names just in case)
       const pt = parseLatLng(
         results[activeResultIndex].lat_lng || 
         results[activeResultIndex].pinLatLng || 
         results[activeResultIndex].latLng
       );
-      
       if (pt) {
         map.panTo([pt.lat, pt.lng], { animate: true, duration: 0.4 });
       }
@@ -162,8 +159,9 @@ export default function MapPreview({
   const [showAiPins, setShowAiPins] = useState(false);
   const [showRelevanceCircle, setShowRelevanceCircle] = useState(true);
   const [hiddenAiPins, setHiddenAiPins] = useState([]);
+  const [isRunningStep3, setIsRunningStep3] = useState(false);
+  const [pinsModifiedSinceStep3, setPinsModifiedSinceStep3] = useState(false);
 
-  // REFS for Scroll Spy and Map Popups
   const sidebarListRef = useRef(null);
   const sidebarItemRefs = useRef([]);
   const markerRefs = useRef([]);
@@ -189,8 +187,7 @@ export default function MapPreview({
             discoveredPins.push({ ...match, point: pt });
           }
         });
-      } catch (e) {
-      }
+      } catch (e) {}
     });
     return discoveredPins;
   }, [aiResult]);
@@ -205,7 +202,6 @@ export default function MapPreview({
         const cleanText = step.result.replace(/```json/i, "").replace(/```/g, "").trim();
         const parsed = JSON.parse(cleanText);
 
-        // Extract Core Intent, Anchors, and Boolean properties dynamically
         if (parsed.AnchorCoordinates || parsed.anchorCoordinates || parsed.sanitizedQuery || parsed.queryType || parsed.QueryType) {
           let coords = parsed.AnchorCoordinates || parsed.anchorCoordinates;
           if (typeof coords === 'string') coords = coords.split(',').map(c => Number(c.trim()));
@@ -216,13 +212,10 @@ export default function MapPreview({
           mergedData.locationIntent = parsed.LocationIntent || parsed.locationIntent;
           mergedData.locationIntentReason = parsed.LocationIntentReason || parsed.locationIntentReasoning || parsed.locationIntentReason || null;
           mergedData.sanitizedQuery = parsed.SanitizedQuery || parsed.sanitizedQuery;
-
-          // Ensure booleans and navigational logic are safely caught
           mergedData.isNavigational = parsed.IsNavigational !== undefined ? parsed.IsNavigational : parsed.isNavigational;
           mergedData.navigationalReasoning = parsed.NavigationalReasoning || parsed.navigationalReasoning || parsed.navigationalReason;
         }
 
-        // Extract Visual Routing from Step 3
         if (parsed.viewportStatus && parsed.evaluationMethod) {
           mergedData.viewportStatus = parsed.viewportStatus;
           mergedData.evaluationMethod = parsed.evaluationMethod;
@@ -232,8 +225,7 @@ export default function MapPreview({
             || parsed.boundary_highlight
             || parsed.Boundary;
         }
-      } catch (e) {
-      }
+      } catch (e) {}
     }
 
     if (Object.keys(mergedData).length > 0) {
@@ -243,39 +235,36 @@ export default function MapPreview({
     return null;
   }, [aiResult]);
 
+  // Only reset hiddenAiPins when a brand-new Step 2 discovery array arrives
+  const aiPinsSignature = useMemo(() => aiPins.map(p => p.realWorldLatLng || p.name).join("|"), [aiPins]);
+
   useEffect(() => {
     if (aiPins.length > 0) {
       setShowAiPins(true);
 
-      // Auto-hide irrelevant pins based on the AI's strict relevance evaluation
       const autoHiddenIndices = aiPins
         .map((pin, index) => {
-          // Check if AI explicitly marked it as false (handles both boolean and string formats)
           const isIrrelevant = pin.isRelevant === false || String(pin.isRelevant).toLowerCase() === "false";
           return isIrrelevant ? index : null;
         })
         .filter(index => index !== null);
 
       setHiddenAiPins(autoHiddenIndices);
+      setPinsModifiedSinceStep3(false);
     }
-  }, [aiPins]);
+  }, [aiPinsSignature]);
 
-  // Open the popup when a result is clicked in the right sidebar
   useEffect(() => {
     if (activeResultIndex !== null && activeResultIndex !== undefined && resultMarkerRefs.current[activeResultIndex]) {
       resultMarkerRefs.current[activeResultIndex].openPopup();
     }
   }, [activeResultIndex]);
 
-  // ==========================================
-  // SCROLL SPY LOGIC (Intersection Observer)
-  // ==========================================
   useEffect(() => {
     if (!sidebarListRef.current || aiPins.length === 0) return;
 
     const observer = new IntersectionObserver(
       (entries) => {
-        // Find the first intersecting entry and set it active
         const visibleEntry = entries.find(e => e.isIntersecting);
         if (visibleEntry) {
           const index = Number(visibleEntry.target.getAttribute("data-index"));
@@ -284,13 +273,11 @@ export default function MapPreview({
       },
       {
         root: sidebarListRef.current,
-        // Trigger only when item hits the exact middle of the sidebar
         rootMargin: "-45% 0px -45% 0px",
         threshold: 0
       }
     );
 
-    // Observe all valid sidebar item refs
     sidebarItemRefs.current.forEach((el) => {
       if (el) observer.observe(el);
     });
@@ -300,18 +287,23 @@ export default function MapPreview({
 
   const handleSidebarClick = (index) => {
     if (activeAiPin === index) {
-      // If it's already active, clicking it again shrinks it and closes the popup
       setActiveAiPin(null);
       if (markerRefs.current[index]) {
         markerRefs.current[index].closePopup();
       }
     } else {
-      // Otherwise, make it active and open the popup
       setActiveAiPin(index);
       if (markerRefs.current[index]) {
         markerRefs.current[index].openPopup();
       }
     }
+  };
+
+  const toggleHidePinByIndex = (idx) => {
+    setHiddenAiPins((prev) =>
+      prev.includes(idx) ? prev.filter((i) => i !== idx) : [...prev, idx]
+    );
+    setPinsModifiedSinceStep3(true);
   };
 
   const resultsTracker = JSON.stringify(results.map(r => ({
@@ -361,8 +353,82 @@ export default function MapPreview({
     }
   }, [boundsString]);
 
+  // Compute live unhidden AI pins and exact circle radii (r1, r2, r3)
+  const unhiddenAiPinsList = useMemo(() => {
+    return aiPins.filter((_, idx) => !hiddenAiPins.includes(idx));
+  }, [aiPins, hiddenAiPins]);
+
+  const liveCircles = useMemo(() => {
+    if (!intentData) return null;
+    const anchor = intentData.anchorCoordinates || (userPoint ? [userPoint.lat, userPoint.lng] : null);
+    return computeExactMapCircles({
+      unhiddenAiPins: unhiddenAiPinsList,
+      anchorCoords: anchor,
+      viewportBounds,
+      viewportStatusStr: String(intentData.viewportStatus || "").toUpperCase(),
+    });
+  }, [unhiddenAiPinsList, intentData, userPoint, viewportBounds]);
+
+  // Handler to execute Step 3 using ONLY the currently unhidden AI pins and live map circles
+  const handleTriggerStep3 = async () => {
+    const activeProjectId = aiResult?.projectId || aiResult?.pendingStep3Context?.projectId;
+    const activeParsedTask = aiResult?.parsedData;
+    const updateCallback = aiResult?.onStep3Update;
+
+    if (!activeProjectId || !activeParsedTask || !aiResult?.steps) {
+      console.warn("Missing projectId or parsedData on aiResult to run Step 3.");
+      return;
+    }
+
+    setIsRunningStep3(true);
+    if (updateCallback) {
+      updateCallback({ ...aiResult, status: "running_step3" });
+    }
+
+    try {
+      const updatedWorkflow = await runStep3FinalEvaluation({
+        projectId: activeProjectId,
+        parsedTask: activeParsedTask,
+        previousSteps: aiResult.steps,
+        unhiddenAiPins: unhiddenAiPinsList,
+        viewportBounds,
+        onStepComplete: (newRes) => {
+          if (updateCallback) {
+            updateCallback({
+              ...newRes,
+              projectId: activeProjectId,
+              onStep3Update: updateCallback,
+            });
+          }
+        },
+      });
+
+      if (updateCallback) {
+        updateCallback({
+          ...updatedWorkflow,
+          projectId: activeProjectId,
+          onStep3Update: updateCallback,
+        });
+      }
+      setPinsModifiedSinceStep3(false);
+    } catch (err) {
+      console.error("Failed to run Step 3:", err);
+    } finally {
+      setIsRunningStep3(false);
+    }
+  };
+
+  // Keep shared bridge updated so AiDraggableWindow can also trigger Step 3
+  useEffect(() => {
+    mapStep3Bridge.triggerStep3 = handleTriggerStep3;
+    mapStep3Bridge.unhiddenCount = unhiddenAiPinsList.length;
+    mapStep3Bridge.liveCircles = liveCircles;
+  });
+
   const maxSliderWidth = Math.max(10, Math.ceil(viewportDims.width * 2));
   const maxSliderHeight = Math.max(10, Math.ceil(viewportDims.height * 2));
+
+  const hasStep3Completed = aiResult?.steps?.length >= 3 && aiResult?.status === "complete";
 
   return (
     <div className="h-full w-full relative bg-slate-100 border-r border-slate-300 flex overflow-hidden">
@@ -375,156 +441,200 @@ export default function MapPreview({
         </select>
       </div>
 
-      {/* NEW: LEFT SIDEBAR FOR AI RESULTS & INTENT */}
-      {showAiPins && (
-        <div className="absolute top-[52px] left-3 bottom-6 w-80 bg-white/95 backdrop-blur-md border border-slate-200 rounded-xl shadow-xl z-[1000] flex flex-col overflow-hidden transition-all pointer-events-auto">
+     {/* PRO FLOATING LEFT SIDEBAR: REAL-WORLD RESULTS & LIVE CIRCLE ZONES */}
+      {aiPins.length > 0 && showAiPins && (
+        <div className="absolute top-14 left-3 z-[1000] w-80 max-h-[calc(100%-70px)] bg-slate-950/95 backdrop-blur-md border border-slate-800 rounded-2xl shadow-2xl flex flex-col overflow-hidden text-slate-100">
+          {/* TOP PORTION: Real-World Results Header + Live r1/r2/r3 Circle Badges + Step 3 Button */}
+          <div className="bg-slate-900 p-3.5 border-b border-slate-800 shrink-0 space-y-2.5">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="text-sm">🌍</span>
+                <span className="font-extrabold text-xs tracking-wide text-white">
+                  Real-World Results
+                </span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                {hiddenAiPins.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setHiddenAiPins([]);
+                      setPinsModifiedSinceStep3(true);
+                    }}
+                    className="text-[10px] bg-slate-800 hover:bg-slate-700 text-amber-300 px-2 py-0.5 rounded-full border border-slate-700 font-bold cursor-pointer"
+                  >
+                    Restore {hiddenAiPins.length} Hidden
+                  </button>
+                )}
+                <span className="bg-purple-600 text-white text-[11px] px-2.5 py-0.5 rounded-full font-extrabold shadow">
+                  {unhiddenAiPinsList.length}
+                </span>
+              </div>
+            </div>
 
-          {/* Header */}
-          <div className="bg-slate-900 text-white px-4 py-3 flex justify-between items-center shrink-0">
-            <h3 className="font-bold text-sm flex items-center gap-2">
-              <span>🌍</span> Real-World Results
-            </h3>
-            <span className="bg-purple-600 px-2 py-0.5 rounded-full text-xs font-bold">{aiPins.length - hiddenAiPins.length}</span>
+            {/* Live Circle Radii Pills (Exc r1 / Good r2 / Acc r3) */}
+            {liveCircles && (
+              <div className="grid grid-cols-3 gap-1.5 text-[10px] text-center">
+                <div className="bg-emerald-950/70 border border-emerald-500/40 rounded-lg py-1.5 px-1 text-emerald-300 font-bold">
+                  🟢 Exc (r1)
+                  <div className="text-white font-mono text-[11px] mt-0.5">
+                    {liveCircles.r1Km} km
+                  </div>
+                </div>
+                <div className="bg-amber-950/70 border border-amber-500/40 rounded-lg py-1.5 px-1 text-amber-300 font-bold">
+                  🟡 Good (r2)
+                  <div className="text-white font-mono text-[11px] mt-0.5">
+                    {liveCircles.r2Km} km
+                  </div>
+                </div>
+                <div className="bg-orange-950/70 border border-orange-500/40 rounded-lg py-1.5 px-1 text-orange-300 font-bold">
+                  🟠 Acc (r3)
+                  <div className="text-white font-mono text-[11px] mt-0.5">
+                    {liveCircles.r3Km} km
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Confirm Pins & Run / Re-Run Step 3 Button */}
+            <button
+              onClick={handleTriggerStep3}
+              disabled={isRunningStep3}
+              className={`w-full py-2 px-3 rounded-xl font-extrabold text-xs shadow-md transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+                aiResult?.status === "awaiting_step3_confirmation" || pinsModifiedSinceStep3
+                  ? "bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 animate-pulse"
+                  : "bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white"
+              } disabled:opacity-50`}
+            >
+              {isRunningStep3
+                ? "⏳ Evaluating Step 3..."
+                : aiResult?.status === "awaiting_step3_confirmation"
+                ? `⚡ Confirm Pins (${unhiddenAiPinsList.length}) & Run Step 3`
+                : `✓ Re-Run Step 3 Rating (${unhiddenAiPinsList.length})`}
+            </button>
           </div>
 
-          {/* AI Pins List */}
+          {/* PRO SCROLLABLE REAL-WORLD PIN LIST (Color-Coded by Circle Ring!) */}
           <div
             ref={sidebarListRef}
-            onMouseLeave={() => setActiveAiPin(null)}
-            className="overflow-y-auto flex-1 p-2 space-y-2 custom-scrollbar scroll-smooth"
+            className="p-2.5 overflow-y-auto space-y-2 flex-1 custom-scrollbar"
           >
-            {aiPins.map((pin, index) => {
-              const isHidden = hiddenAiPins.includes(index);
-              const isActive = activeAiPin === index;
-              const reasonText = pin.relevanceReason || pin.reasoning || pin.verificationNotes;
+            {aiPins.map((pin, idx) => {
+              const pinRank = pin.rank ?? idx + 1;
+              const isHidden = hiddenAiPins.includes(idx);
+              const isSelected = activeAiPin === idx;
+              const dist = Number(pin.distanceFromAnchorKm);
+              const r1 = liveCircles?.r1Km ?? 0.5;
+              const r2 = liveCircles?.r2Km ?? 2.0;
+              const r3 = liveCircles?.r3Km ?? 5.0;
 
-              // RENDER HIDDEN PINS AS GRAYED OUT (INDIVIDUAL UNHIDE)
-              if (isHidden) {
-                return (
-                  <div key={`hidden-${index}`} className="p-2.5 rounded-lg border border-slate-200 bg-slate-50 flex justify-between items-center transition-all">
-                    <div className="flex items-center gap-2 opacity-50 grayscale">
-                      <span className="flex items-center justify-center w-5 h-5 rounded-full text-[9px] font-bold bg-slate-300 text-slate-600">
-                        {index + 1}
-                      </span>
-                      <h4 className="text-xs font-bold text-slate-600 line-through truncate max-w-[170px]">
-                        {pin.realWorldName || pin.name}
-                      </h4>
-                    </div>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setHiddenAiPins(prev => prev.filter(i => i !== index));
-                      }}
-                      className="text-[10px] bg-blue-50 text-blue-600 font-bold px-2 py-1 rounded border border-blue-200 hover:bg-blue-100 transition-colors shadow-sm"
-                    >
-                      Unhide
-                    </button>
-                  </div>
-                );
+              // Determine zone ring color: Green (<= r1), Orange (<= r2), Red (<= r3), Pink (> r3)
+              let zoneBadge = "bg-fuchsia-500/20 text-fuchsia-300 border-fuchsia-500/40";
+              let zoneCard = "bg-slate-900/90 border-fuchsia-500/35 hover:border-fuchsia-400";
+              let rankCircle = "bg-fuchsia-600 text-white";
+              let zoneLabel = "🩷 Bad (>r3)";
+
+              if (Number.isFinite(dist)) {
+                if (dist <= r1) {
+                  zoneBadge = "bg-emerald-500/20 text-emerald-300 border-emerald-500/40";
+                  zoneCard = "bg-slate-900/90 border-emerald-500/40 hover:border-emerald-400";
+                  rankCircle = "bg-emerald-500 text-slate-950";
+                  zoneLabel = "🟢 Exc (r1)";
+                } else if (dist <= r2) {
+                  zoneBadge = "bg-amber-500/20 text-amber-300 border-amber-500/40";
+                  zoneCard = "bg-slate-900/90 border-amber-500/40 hover:border-amber-400";
+                  rankCircle = "bg-amber-500 text-slate-950";
+                  zoneLabel = "🟠 Good (r2)";
+                } else if (dist <= r3) {
+                  zoneBadge = "bg-rose-500/20 text-rose-300 border-rose-500/40";
+                  zoneCard = "bg-slate-900/90 border-rose-500/40 hover:border-rose-400";
+                  rankCircle = "bg-rose-600 text-white";
+                  zoneLabel = "🔴 Acc (r3)";
+                }
               }
+
+              const categoryText =
+                pin.realWorldCategory || pin.category || pin.type || "Real-World POI";
 
               return (
                 <div
-                  key={index}
-                  data-index={index}
-                  ref={(el) => sidebarItemRefs.current[index] = el}
-                  onClick={() => handleSidebarClick(index)}
-                  className={`p-3 rounded-lg cursor-pointer border transition-all duration-200 relative group ${isActive
-                    ? "bg-white border-fuchsia-400 shadow-[0_0_0_1px_rgba(232,121,249,1)]"
-                    : "bg-white border-slate-200 hover:border-purple-300 hover:bg-purple-50 hover:shadow-sm"
-                    }`}
+                  key={idx}
+                  data-index={idx}
+                  ref={(el) => (sidebarItemRefs.current[idx] = el)}
+                  onClick={() => {
+                    if (!isHidden) {
+                      handleSidebarClick(idx);
+                    }
+                  }}
+                  className={`p-2.5 rounded-xl border transition-all cursor-pointer ${
+                    isHidden
+                      ? "bg-slate-950/40 border-slate-800/60 opacity-45"
+                      : isSelected
+                      ? `${zoneCard} ring-2 ring-sky-400 shadow-lg`
+                      : zoneCard
+                  }`}
                 >
-                  <div className="flex justify-between items-start mb-1">
-                    <div className="flex items-center gap-2">
-                      <span className={`flex items-center justify-center w-5 h-5 rounded-full text-[9px] font-bold text-white shadow-sm ${isActive ? 'bg-fuchsia-600' : 'bg-purple-600'}`}>
-                        {index + 1}
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span
+                        className={`w-6 h-6 rounded-full text-[10px] font-extrabold flex items-center justify-center shrink-0 shadow ${
+                          isHidden ? "bg-slate-700 text-slate-400" : rankCircle
+                        }`}
+                      >
+                        {pinRank}
                       </span>
-                      <h4 className={`text-sm font-bold truncate pr-6 ${isActive ? 'text-fuchsia-900' : 'text-slate-800'}`}>
+                      <span
+                        className={`font-extrabold text-xs truncate ${
+                          isHidden ? "line-through text-slate-500" : "text-white"
+                        }`}
+                      >
                         {pin.realWorldName || pin.name}
-                      </h4>
+                      </span>
                     </div>
 
-                    {/* Hide Button (Shows on Hover or if Active) */}
                     <button
+                      type="button"
                       onClick={(e) => {
                         e.stopPropagation();
-                        setHiddenAiPins(prev => [...prev, index]);
-                        if (markerRefs.current[index]) markerRefs.current[index].closePopup();
-                        if (isActive) setActiveAiPin(null);
+                        toggleHidePinByIndex(idx);
                       }}
-                      className={`absolute top-2 right-2 text-[10px] bg-slate-100 hover:bg-red-50 text-slate-500 hover:text-red-500 px-2 py-0.5 rounded border border-slate-200 hover:border-red-200 transition-colors ${isActive ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}
+                      className={`px-2 py-0.5 rounded-md text-[10px] font-extrabold border shrink-0 transition-colors cursor-pointer ${
+                        isHidden
+                          ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/40 hover:bg-emerald-500/30"
+                          : "bg-slate-800 text-slate-300 border-slate-700 hover:bg-rose-600 hover:text-white hover:border-rose-500"
+                      }`}
                     >
-                      Hide
+                      {isHidden ? "Unhide" : "Hide"}
                     </button>
                   </div>
 
-                  <div className="ml-7 space-y-1">
-                    <span className="inline-block px-1.5 py-0.5 bg-slate-100 text-slate-600 rounded text-[9px] font-bold uppercase tracking-wider border border-slate-200">
-                      {pin.category || pin.realWorldCategory || pin.type || "Verified Location"}
+                  {/* Category Pill + Circle Ring Pill + Distance */}
+                  <div className="flex flex-wrap items-center gap-1.5 mt-2 pl-8">
+                    <span className="px-2 py-0.5 rounded bg-slate-950 border border-slate-800 text-[9px] font-bold uppercase tracking-wider text-sky-300 truncate max-w-[140px]">
+                      {categoryText}
                     </span>
-                    <p className="text-[10px] text-slate-500 line-clamp-2 leading-relaxed">
-                      {pin.realWorldAddress || pin.address}
-                    </p>
-                    {reasonText && (
-                      <div className="mt-2 pt-1.5 border-t border-slate-100">
-                        <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider block mb-0.5">Reasoning</span>
-                        <p className="text-[10px] text-slate-600 leading-snug">{reasonText}</p>
-                      </div>
+
+                    <span
+                      className={`px-1.5 py-0.5 rounded border text-[9px] font-extrabold ${zoneBadge}`}
+                    >
+                      {zoneLabel}
+                    </span>
+
+                    {pin.distanceFromAnchorKm !== undefined && (
+                      <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-800 text-slate-300 font-mono text-[9px] font-bold">
+                        {pin.distanceFromAnchorKm} km
+                      </span>
                     )}
+                  </div>
+
+                  {/* Address */}
+                  <div className="text-[10px] text-slate-400 mt-1.5 pl-8 line-clamp-2 leading-snug">
+                    {pin.realWorldAddress || pin.address}
                   </div>
                 </div>
               );
             })}
-
-            {/* Added empty space at bottom so the last item can be scrolled to the center for Intersection Observer */}
-            <div className="h-40 pointer-events-none opacity-0"></div>
           </div>
-
-          {/* Bottom Panel: Step 1 Intent Data */}
-          {intentData && (
-            <div className="bg-white border-t border-slate-200 p-3 shrink-0 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)] relative z-10">
-              <h4 className="font-bold text-slate-800 text-xs mb-2 flex items-center gap-1.5">
-                <svg className="w-3.5 h-3.5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-                Task Intent Extractions
-              </h4>
-              <div className="space-y-1.5 text-[10px] bg-slate-50 p-2 rounded border border-slate-100">
-
-                <div className="flex justify-between items-start gap-2">
-                  <span className="text-slate-500 shrink-0 font-medium">Query Type</span>
-                  <span className="font-semibold text-slate-800 text-right line-clamp-1">{intentData.queryType || 'N/A'}</span>
-                </div>
-
-                <div className="flex justify-between items-start gap-2">
-                  <span className="text-slate-500 shrink-0 font-medium">Loc. Intent</span>
-                  <span className="font-semibold text-slate-800 text-right line-clamp-1">{intentData.locationIntent || 'N/A'}</span>
-                </div>
-
-                {intentData.locationIntentReason && (
-                  <div className="pt-1.5 mt-1 border-t border-slate-200">
-                    <span className="text-slate-500 font-medium block mb-0.5">Loc. Intent Reason</span>
-                    <span className="font-medium text-slate-700 leading-snug block line-clamp-2">
-                      {intentData.locationIntentReason}
-                    </span>
-                  </div>
-                )}
-
-                <div className="flex justify-between items-center gap-2">
-                  <span className="text-slate-500 shrink-0 font-medium">Navigational</span>
-                  <span className={`font-bold px-1.5 py-0.5 rounded text-[9px] uppercase tracking-wider ${String(intentData.isNavigational).toLowerCase() === 'yes' || intentData.isNavigational === true ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-200 text-slate-600'}`}>
-                    {intentData.isNavigational !== undefined ? String(intentData.isNavigational) : 'N/A'}
-                  </span>
-                </div>
-
-                <div className="pt-2 mt-1.5 border-t border-slate-200">
-                  <span className="text-slate-500 font-medium block mb-0.5">Navigational Reasoning</span>
-                  <span className="font-medium text-slate-700 leading-snug block line-clamp-3">
-                    {intentData.navigationalReasoning || intentData.locationIntentReason || intentData.reasoning || 'N/A'}
-                  </span>
-                </div>
-
-              </div>
-            </div>
-          )}
         </div>
       )}
 
@@ -537,7 +647,7 @@ export default function MapPreview({
         className="w-full h-full z-0"
         onClick={() => setActiveAiPin(null)}
       >
-        <MapCameraController activeAiPin={activeAiPin} aiPins={aiPins} />
+        <MapCameraController activeAiPin={activeAiPin} aiPins={aiPins} activeResultIndex={activeResultIndex} results={results} />
 
         <MapControlButtons
           userPoint={userPoint}
@@ -547,7 +657,10 @@ export default function MapPreview({
           showLines={showLines}
           setShowLines={setShowLines}
           hiddenAiPinsCount={hiddenAiPins.length}
-          onUnhideAll={() => setHiddenAiPins([])}
+          onUnhideAll={() => {
+            setHiddenAiPins([]);
+            setPinsModifiedSinceStep3(true);
+          }}
         />
 
         <AiOverlayControls
@@ -637,7 +750,6 @@ export default function MapPreview({
 
         {/* AI PINS RENDERING WITH GROUP CHECK */}
         {(() => {
-          // 1. Group Check: Are ANY of the unhidden pins strictly inside the requested location?
           const hasAnyInsideResult = aiPins.some((pin, index) => {
             if (hiddenAiPins.includes(index)) return false;
             const insideFlag = pin.isStrictlyInsideLocation;
@@ -647,10 +759,7 @@ export default function MapPreview({
           return showAiPins && aiPins.map((aiPin, index) => {
             if (hiddenAiPins.includes(index)) return null;
 
-            // 2. Is THIS specific pin strictly inside?
             const isInside = aiPin.isStrictlyInsideLocation !== false && String(aiPin.isStrictlyInsideLocation).toLowerCase() !== "false";
-
-            // 3. The Magic Logic: It only turns gray IF it is outside AND there is at least one result inside.
             const shouldBeGray = !isInside && hasAnyInsideResult;
 
             return (
@@ -658,6 +767,7 @@ export default function MapPreview({
                 key={`ai-${index}`} 
                 position={[aiPin.point.lat, aiPin.point.lng]} 
                 icon={createAiIcon(index, activeAiPin === index, shouldBeGray)}
+                ref={(el) => markerRefs.current[index] = el}
                 eventHandlers={{
                   click: () => setActiveAiPin(index),
                   popupclose: () => setActiveAiPin(null)
@@ -670,6 +780,7 @@ export default function MapPreview({
                       onClick={(e) => {
                         e.stopPropagation();
                         setHiddenAiPins(prev => [...prev, index]);
+                        setPinsModifiedSinceStep3(true);
                         setActiveAiPin(null);
                       }}
                       className="text-[9px] bg-red-50 text-red-600 px-1.5 py-0.5 rounded border border-red-200 hover:bg-red-100 transition-colors cursor-pointer"
@@ -682,21 +793,18 @@ export default function MapPreview({
                     {aiPin.realWorldName || aiPin.name}
                   </div>
                   
-                  {/* Category Line */}
                   {(aiPin.category || aiPin.realWorldCategory) && (
                     <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mt-0.5 mb-1">
                       {aiPin.category || aiPin.realWorldCategory}
                     </div>
                   )}
 
-                  {/* UI WARNING 1: Gray Pin Spillover Reason */}
                   {shouldBeGray && (
                     <div className="mt-1 mb-1 p-1 bg-slate-100 border border-slate-300 rounded text-[9px] text-slate-600 leading-tight">
                       <span className="font-bold uppercase">Note:</span> Located outside the requested boundary (Nearby Alternative).
                     </div>
                   )}
 
-                  {/* UI WARNING 2: Auto-Hidden Relevance Reason (Visible if user unhides it) */}
                   {(aiPin.isRelevant === false || String(aiPin.isRelevant).toLowerCase() === "false") && (
                     <div className="mt-1.5 mb-1 p-1.5 bg-red-50 border border-red-200 rounded text-[9px] text-red-700 leading-tight shadow-sm">
                       <span className="font-bold uppercase">Auto-Hidden:</span> {aiPin.relevanceReason || "Intent mismatch detected."}
@@ -719,7 +827,7 @@ export default function MapPreview({
           });
         })()}
 
-      {/* REAL-WORLD RESULTS MARKERS */}
+        {/* REAL-WORLD RESULTS MARKERS */}
         {results.map((result, index) => {
           const point = parseLatLng(result.lat_lng || result.pinLatLng);
           if (!point) return null;
@@ -729,34 +837,25 @@ export default function MapPreview({
               key={`result-${index}`} 
               position={[point.lat, point.lng]} 
               icon={createResultIcon(index)}
-              ref={(el) => resultMarkerRefs.current[index] = el} // Attach the ref so we can open it!
+              ref={(el) => resultMarkerRefs.current[index] = el}
             >
               <Popup className="min-w-[220px]">
-                {/* Result Title Bar */}
                 <div className="text-xs font-bold text-sky-600 border-b border-sky-100 pb-1 mb-1.5 uppercase tracking-wide">
                   Ground Truth {index + 1}
                 </div>
-                
-                {/* Name */}
                 <div className="text-sm font-bold text-slate-800 leading-tight">
                   {result.name || result.title || "Unknown Location"}
                 </div>
-                
-                {/* Category */}
                 {(result.category || result.type) && (
                   <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mt-0.5 mb-1.5">
                     {result.category || result.type}
                   </div>
                 )}
-                
-                {/* Address */}
                 {result.address && (
                   <div className="text-[11px] text-slate-600 mt-1 leading-snug">
                     {result.address}
                   </div>
                 )}
-                
-                {/* Coordinates */}
                 <div className="text-[10px] font-mono text-slate-400 mt-2 pt-1.5 border-t border-slate-100 flex items-center gap-1.5">
                   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3 h-3 text-sky-400 shrink-0">
                     <path fillRule="evenodd" d="M9.69 18.933l.003.001C9.89 19.02 10 19 10 19s.11.02.308-.066l.002-.001.006-.003.018-.008a5.741 5.741 0 00.281-.14c.186-.096.446-.24.757-.433.62-.384 1.445-.966 2.274-1.765C15.302 14.988 17 12.493 17 9A7 7 0 103 9c0 3.492 1.698 5.988 3.355 7.584a13.731 13.731 0 002.273 1.765 11.842 11.842 0 00.976.544l.062.029.018.008.006.003zM10 11.25a2.25 2.25 0 100-4.5 2.25 2.25 0 000 4.5z" clipRule="evenodd" />
@@ -769,7 +868,7 @@ export default function MapPreview({
         })}
       </MapContainer>
 
-      {/* Dynamic Viewport Controller Widget - Shifted right if Sidebar exists */}
+      {/* Dynamic Viewport Controller Widget */}
       {viewportCenter && viewportBounds && aiPins.length === 0 && (
         <div className={`absolute bottom-6 z-[1000] bg-white/95 rounded-lg shadow-lg border transition-all duration-300 backdrop-blur-sm ${showAiPins ? 'left-[340px]' : 'left-3'} ${isMasterLocked ? 'w-auto p-2 border-green-400' : 'w-[300px] p-4 border-slate-200'}`}>
           {isMasterLocked ? (
@@ -780,7 +879,7 @@ export default function MapPreview({
           ) : (
             <>
               <div className="text-xs font-bold text-slate-800 mb-3 flex justify-between items-center">
-                <span>Adjust Viewport Size</span><span className="text-[10px] text-red-500 font-medium">* Lock required</span>
+                <span>Adjust Viewport Size</span><span className="text-[10px] text-red-500 font-medium">Lock required</span>
               </div>
               <div className="space-y-3">
                 <div className={`border rounded p-2 transition-colors ${axisLocks.width ? 'bg-slate-50 border-slate-200' : 'bg-white border-purple-200 shadow-sm'}`}>
