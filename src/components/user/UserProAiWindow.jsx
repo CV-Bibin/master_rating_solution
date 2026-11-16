@@ -70,7 +70,6 @@ function getRatingTheme(rating) {
 
 // ==========================================
 // REAL-WORLD PIN CIRCLE ZONE COLOR HELPER
-// Green (Exc <= r1) -> Orange (Good <= r2) -> Red (Acc <= r3) -> Pink (Bad > r3)
 // ==========================================
 function getPinZoneTheme(distKm, r1, r2, r3) {
   const d = Number(distKm);
@@ -79,7 +78,7 @@ function getPinZoneTheme(distKm, r1, r2, r3) {
       label: "Zone N/A",
       card: "bg-slate-950/90 border-slate-800",
       badge: "bg-slate-800 text-slate-300 border-slate-700",
-      dot: "bg-slate-400",
+      rankBg: "bg-slate-700 text-slate-300",
     };
   }
   if (d <= r1) {
@@ -88,7 +87,6 @@ function getPinZoneTheme(distKm, r1, r2, r3) {
       card: "bg-emerald-950/35 border-emerald-500/40 hover:border-emerald-400/60",
       badge: "bg-emerald-500/20 text-emerald-300 border-emerald-500/40",
       rankBg: "bg-emerald-600 text-white",
-      dot: "bg-emerald-400",
     };
   }
   if (d <= r2) {
@@ -97,7 +95,6 @@ function getPinZoneTheme(distKm, r1, r2, r3) {
       card: "bg-amber-950/35 border-amber-500/40 hover:border-amber-400/60",
       badge: "bg-amber-500/20 text-amber-300 border-amber-500/40",
       rankBg: "bg-amber-500 text-slate-950",
-      dot: "bg-amber-400",
     };
   }
   if (d <= r3) {
@@ -106,7 +103,6 @@ function getPinZoneTheme(distKm, r1, r2, r3) {
       card: "bg-rose-950/35 border-rose-500/40 hover:border-rose-400/60",
       badge: "bg-rose-500/20 text-rose-300 border-rose-500/40",
       rankBg: "bg-rose-600 text-white",
-      dot: "bg-rose-500",
     };
   }
   return {
@@ -114,18 +110,11 @@ function getPinZoneTheme(distKm, r1, r2, r3) {
     card: "bg-fuchsia-950/40 border-fuchsia-500/45 hover:border-fuchsia-400/70",
     badge: "bg-fuchsia-500/20 text-fuchsia-300 border-fuchsia-500/45",
     rankBg: "bg-fuchsia-600 text-white",
-    dot: "bg-fuchsia-400",
   };
 }
 
 // ==========================================
 // STAGE 1 CARD: QUERY INTENT & SPATIAL ANCHOR
-// Ordered strictly:
-// 1. Target Query
-// 2. Navigational or Not + Reason for Navigational Rating
-// 3. Anchor Point Name + Anchor Point Value
-// 4. Reason for Anchor Point
-// 5. Expected Results / User Intent
 // ==========================================
 function ProStep1Card({ data, taskQuery }) {
   const root = data?.queryAnalysis || data?.visualRouting || data || {};
@@ -246,7 +235,7 @@ function ProStep1Card({ data, taskQuery }) {
           </div>
         </div>
 
-        {/* 3. ANCHOR POINT NAME & ANCHOR POINT VALUE */}
+        {/* 3. ANCHOR POINT NAME & 4. ANCHOR POINT VALUE */}
         <div className="grid grid-cols-2 gap-2">
           <div className="bg-slate-950/90 border border-slate-800 rounded-lg p-2.5">
             <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">
@@ -272,7 +261,7 @@ function ProStep1Card({ data, taskQuery }) {
           </div>
         </div>
 
-        {/* 4. REASON FOR ANCHOR POINT */}
+        {/* 5. REASON FOR ANCHOR POINT */}
         <div className="bg-slate-950/90 border border-slate-800 rounded-lg p-2.5">
           <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block mb-0.5">
             5. Reason for Anchor Point
@@ -280,7 +269,7 @@ function ProStep1Card({ data, taskQuery }) {
           <p className="text-[11px] text-slate-300 leading-relaxed">{anchorReason}</p>
         </div>
 
-        {/* 5. EXPECTED RESULTS / USER INTENT */}
+        {/* 6. EXPECTED RESULTS / USER INTENT */}
         <div className="bg-blue-950/25 border border-blue-500/30 rounded-lg p-2.5">
           <span className="text-[10px] font-bold uppercase tracking-wider text-blue-300 block mb-0.5">
             6. Expected Results & User Intent
@@ -294,12 +283,13 @@ function ProStep1Card({ data, taskQuery }) {
 
 // ==========================================
 // STAGE 2 CARD: REAL-WORLD GROUND TRUTH
-// Color-coded by Circle Ring:
-// Green (Exc <= r1) | Orange (Good <= r2) | Red (Acc <= r3) | Pink (Bad > r3)
-// Plus Category/Type badge on every item!
+// - Duplicate 4-circle legend bar removed (already shown in left map panel)
+// - 20 discovered locations list is COLLAPSED (false) by default!
 // ==========================================
 function ProStep2Card({ data }) {
-  const [expanded, setExpanded] = useState(true);
+  // Initialized to FALSE so the 20 results stay hidden/collapsed until clicked!
+  const [expanded, setExpanded] = useState(false);
+
   const root = data?.realWorldDiscovery || data || {};
   const matches = Array.isArray(root.topMatches) ? root.topMatches : [];
 
@@ -307,16 +297,17 @@ function ProStep2Card({ data }) {
     (m) => m.isRelevant !== false && String(m.isRelevant).toLowerCase() !== "false"
   );
 
-  // Compute dynamic r1, r2, r3 thresholds from the discovered pin distances so each pin is color-coded accurately
+  // Use live circles from mapStep3Bridge if available, or fallback to sorted distances
+  const liveCircles = mapStep3Bridge?.liveCircles;
   const sortedDists = relevantMatches
     .map((m) => Number(m.distanceFromAnchorKm))
     .filter((d) => Number.isFinite(d))
     .sort((a, b) => a - b);
 
   const d0 = sortedDists[0] ?? 0.5;
-  const r1 = +(sortedDists[Math.min(1, sortedDists.length - 1)] ?? Math.max(d0, 0.5)).toFixed(2);
-  const r2 = +(sortedDists[Math.min(4, sortedDists.length - 1)] ?? Math.max(r1 * 2, 1.5)).toFixed(2);
-  const r3 = +(sortedDists[Math.min(9, sortedDists.length - 1)] ?? Math.max(r2 * 1.8, 3.0)).toFixed(2);
+  const r1 = liveCircles?.r1Km ?? +(sortedDists[Math.min(1, sortedDists.length - 1)] ?? Math.max(d0, 0.5)).toFixed(2);
+  const r2 = liveCircles?.r2Km ?? +(sortedDists[Math.min(4, sortedDists.length - 1)] ?? Math.max(r1 * 2, 1.5)).toFixed(2);
+  const r3 = liveCircles?.r3Km ?? +(sortedDists[Math.min(9, sortedDists.length - 1)] ?? Math.max(r2 * 1.8, 3.0)).toFixed(2);
 
   const insideCount = matches.filter(
     (m) =>
@@ -359,22 +350,7 @@ function ProStep2Card({ data }) {
           </div>
         </div>
 
-        {/* Color Legend Bar */}
-        <div className="grid grid-cols-4 gap-1.5 text-[10px] font-bold text-center">
-          <div className="bg-emerald-950/60 border border-emerald-500/40 text-emerald-300 py-1 px-1.5 rounded">
-            🟢 Exc (≤{r1}km)
-          </div>
-          <div className="bg-amber-950/60 border border-amber-500/40 text-amber-300 py-1 px-1.5 rounded">
-            🟠 Good (≤{r2}km)
-          </div>
-          <div className="bg-rose-950/60 border border-rose-500/40 text-rose-300 py-1 px-1.5 rounded">
-            🔴 Acc (≤{r3}km)
-          </div>
-          <div className="bg-fuchsia-950/60 border border-fuchsia-500/45 text-fuchsia-300 py-1 px-1.5 rounded">
-            🩷 Bad (&gt;{r3}km)
-          </div>
-        </div>
-
+        {/* Collapsible Drawer (Hidden by Default) */}
         {matches.length > 0 && (
           <div>
             <button
@@ -384,7 +360,7 @@ function ProStep2Card({ data }) {
             >
               <span>
                 {expanded
-                  ? "Hide Discovered Real-World Locations"
+                  ? `Hide Discovered Real-World Locations (${matches.length})`
                   : `Inspect ${matches.length} Discovered Real-World Locations`}
               </span>
               <span className="text-slate-400">{expanded ? "▲" : "▼"}</span>
@@ -413,7 +389,6 @@ function ProStep2Card({ data }) {
                             <div className="text-xs font-extrabold text-white truncate">
                               {m.realWorldName || m.name}
                             </div>
-                            {/* Category / Type Badge */}
                             <div className="flex flex-wrap items-center gap-1.5 mt-1">
                               <span className="px-2 py-0.5 rounded bg-slate-900/90 border border-slate-700 text-[9px] font-bold uppercase tracking-wider text-sky-300">
                                 🏷️ {categoryLabel}
@@ -453,7 +428,6 @@ function ProStep2Card({ data }) {
 
 // ==========================================
 // STAGE 3 CARD: PRO CANDIDATE RATING CARDS
-// Explicitly displays Confidence Level + Alternative Rating on EVERY candidate!
 // ==========================================
 function ProStep3Card({ data }) {
   const evaluations =
@@ -511,10 +485,8 @@ function ProStep3Card({ data }) {
             key={idx}
             className={`bg-slate-900/95 border ${theme.border} rounded-xl shadow-lg overflow-hidden relative`}
           >
-            {/* Left Accent Bar */}
             <div className={`absolute left-0 top-0 bottom-0 w-1.5 ${theme.accent}`} />
 
-            {/* Candidate Header */}
             <div className="bg-slate-800/60 px-4 py-2.5 border-b border-slate-800 flex items-center justify-between gap-2 pl-4">
               <div className="flex items-center gap-2.5 min-w-0">
                 <span className="w-6 h-6 rounded-lg bg-slate-950 border border-slate-700 text-white text-xs font-extrabold flex items-center justify-center shrink-0">
@@ -530,9 +502,7 @@ function ProStep3Card({ data }) {
               </span>
             </div>
 
-            {/* Body */}
             <div className="p-3.5 pl-4 space-y-2.5">
-              {/* Distance, Confidence Pill & Demotion Chips */}
               <div className="flex flex-wrap items-center gap-1.5">
                 {distKm !== undefined && distKm !== null && (
                   <span className="px-2 py-0.5 rounded-md bg-slate-950 border border-slate-800 text-slate-200 font-mono text-[11px] font-bold">
@@ -540,7 +510,6 @@ function ProStep3Card({ data }) {
                   </span>
                 )}
 
-                {/* Confidence Level Badge (Always visible!) */}
                 <span
                   className={`px-2.5 py-0.5 rounded-md text-[10px] font-extrabold uppercase tracking-wider border ${
                     isHighConf
@@ -574,7 +543,6 @@ function ProStep3Card({ data }) {
                 )}
               </div>
 
-              {/* Alternative Rating Box (Always visible — highlights if alternative exists, or confirms None) */}
               {hasAlt ? (
                 <div className="bg-amber-500/15 border-2 border-amber-500/40 rounded-lg p-2.5 text-[11px] text-amber-100 space-y-1 shadow-inner">
                   <div className="font-extrabold uppercase tracking-wider text-[10px] text-amber-300 flex items-center justify-between">
@@ -596,7 +564,6 @@ function ProStep3Card({ data }) {
                 </div>
               )}
 
-              {/* Map Zone Comparison */}
               {item.groundTruthComparison && (
                 <div className="text-[11px] text-slate-300 bg-slate-950/70 px-2.5 py-1.5 rounded-lg border border-slate-800/80">
                   <span className="font-bold text-slate-400 uppercase text-[10px] mr-1.5">
@@ -606,7 +573,6 @@ function ProStep3Card({ data }) {
                 </div>
               )}
 
-              {/* Reasoning */}
               {item.reasoning && (
                 <div className="text-[11px] text-slate-300 leading-relaxed pt-1.5 border-t border-slate-800/80">
                   <span className="font-bold text-slate-400 uppercase text-[10px] block mb-0.5">
@@ -693,13 +659,16 @@ export default function UserProAiWindow({ result, onClose }) {
 
   const step1Done = stepsCount >= 1;
   const step1Running = status === "running" && stepsCount === 0;
+  const step1Failed = status === "error" && stepsCount === 0;
 
   const step2Done = stepsCount >= 2;
   const step2Running = status === "running" && stepsCount === 1;
+  const step2Failed = status === "error" && stepsCount === 1;
 
   const step3Waiting = status === "awaiting_step3_confirmation";
   const step3Running = status === "running_step3";
   const step3Done = stepsCount >= 3 && status === "complete";
+  const step3Failed = status === "error" && stepsCount >= 2;
 
   const taskQuery = result?.parsedData?.query || "";
 
@@ -735,6 +704,8 @@ export default function UserProAiWindow({ result, onClose }) {
             <p className="text-[10px] text-slate-400 select-none mt-0.5">
               {step3Done
                 ? "Evaluation Complete — All Candidates Rated"
+                : status === "error"
+                ? `Paused on Error (${stepsCount} Step${stepsCount === 1 ? "" : "s"} Saved)`
                 : step3Running
                 ? "Step 3/3: Computing Final Relevance Ratings..."
                 : step3Waiting
@@ -769,12 +740,14 @@ export default function UserProAiWindow({ result, onClose }) {
             className={`px-2.5 py-1.5 rounded-lg border text-[10px] font-bold flex items-center gap-1.5 transition-all ${
               step1Done
                 ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300"
+                : step1Failed
+                ? "bg-rose-500/20 border-rose-500/40 text-rose-300"
                 : step1Running
                 ? "bg-blue-500/20 border-blue-400 text-blue-200 animate-pulse"
                 : "bg-slate-900 border-slate-800 text-slate-500"
             }`}
           >
-            <span>{step1Done ? "✓" : step1Running ? "⏳" : "1"}</span>
+            <span>{step1Done ? "✓" : step1Failed ? "✕" : step1Running ? "⏳" : "1"}</span>
             <span className="truncate">Query Intent</span>
           </div>
 
@@ -782,12 +755,14 @@ export default function UserProAiWindow({ result, onClose }) {
             className={`px-2.5 py-1.5 rounded-lg border text-[10px] font-bold flex items-center gap-1.5 transition-all ${
               step2Done
                 ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300"
+                : step2Failed
+                ? "bg-rose-500/20 border-rose-500/40 text-rose-300"
                 : step2Running
                 ? "bg-purple-500/20 border-purple-400 text-purple-200 animate-pulse"
                 : "bg-slate-900 border-slate-800 text-slate-500"
             }`}
           >
-            <span>{step2Done ? "✓" : step2Running ? "⏳" : "2"}</span>
+            <span>{step2Done ? "✓" : step2Failed ? "✕" : step2Running ? "⏳" : "2"}</span>
             <span className="truncate">Real-World</span>
           </div>
 
@@ -795,6 +770,8 @@ export default function UserProAiWindow({ result, onClose }) {
             className={`px-2.5 py-1.5 rounded-lg border text-[10px] font-bold flex items-center gap-1.5 transition-all ${
               step3Done
                 ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300"
+                : step3Failed
+                ? "bg-rose-500/20 border-rose-500/40 text-rose-300"
                 : step3Running
                 ? "bg-emerald-500/20 border-emerald-400 text-emerald-200 animate-pulse"
                 : step3Waiting
@@ -803,7 +780,7 @@ export default function UserProAiWindow({ result, onClose }) {
             }`}
           >
             <span>
-              {step3Done ? "✓" : step3Running ? "⏳" : step3Waiting ? "⏸" : "3"}
+              {step3Done ? "✓" : step3Failed ? "✕" : step3Running ? "⏳" : step3Waiting ? "⏸" : "3"}
             </span>
             <span className="truncate">Final Rating</span>
           </div>
@@ -816,12 +793,6 @@ export default function UserProAiWindow({ result, onClose }) {
           ref={scrollRef}
           className="flex-1 p-3.5 overflow-y-auto space-y-3.5 relative custom-scrollbar"
         >
-          {status === "error" && (
-            <div className="bg-rose-950/90 border border-rose-700 text-rose-200 px-4 py-3 rounded-xl text-xs font-semibold">
-              ⚠️ {result.error || "An error occurred while running the AI pipeline."}
-            </div>
-          )}
-
           {/* LIVE LOADING STATE: STEP 1 */}
           {step1Running && (
             <div className="bg-slate-900 border-2 border-blue-500/60 rounded-xl p-4 shadow-lg flex items-center gap-3.5 animate-in fade-in duration-200">
@@ -837,7 +808,7 @@ export default function UserProAiWindow({ result, onClose }) {
             </div>
           )}
 
-          {/* RENDER COMPLETED STEPS */}
+          {/* RENDER COMPLETED STEPS FIRST (SO THEY NEVER VANISH IF A LATER STEP FAILS!) */}
           {result?.steps?.map((step, idx) => {
             const parsed = safeParseJson(step.result);
             if (idx === 0 && parsed) {
@@ -912,6 +883,27 @@ export default function UserProAiWindow({ result, onClose }) {
                   Evaluating each candidate against active map circles, boundary rules, and guidelines...
                 </p>
               </div>
+            </div>
+          )}
+
+          {/* NON-DESTRUCTIVE ERROR BANNER (Rendered BELOW completed steps so previous steps stay visible!) */}
+          {status === "error" && (
+            <div className="bg-rose-950/90 border-2 border-rose-600/80 text-rose-100 p-4 rounded-xl text-xs space-y-2.5 shadow-lg animate-in fade-in duration-200">
+              <div className="font-extrabold text-rose-300 uppercase tracking-wider flex items-center gap-1.5">
+                <span>⚠️</span> Step {stepsCount + 1} Failed (Previous Steps Preserved)
+              </div>
+              <p className="text-[11px] text-rose-200 leading-relaxed">
+                {result.error || "An error occurred while executing this step."}
+              </p>
+              {stepsCount === 2 && mapStep3Bridge.triggerStep3 && (
+                <button
+                  type="button"
+                  onClick={() => mapStep3Bridge.triggerStep3()}
+                  className="w-full py-2 px-3 bg-rose-600 hover:bg-rose-500 text-white font-extrabold rounded-lg text-xs shadow cursor-pointer transition-colors"
+                >
+                  ↻ Retry Step 3 Rating
+                </button>
+              )}
             </div>
           )}
 

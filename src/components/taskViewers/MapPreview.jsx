@@ -8,6 +8,7 @@ import AiOverlayControls from "./AiOverlayControls";
 import DistanceDemotionZones from "../DistanceDemotionZones";
 import { runStep3FinalEvaluation, computeExactMapCircles } from "../../services/workflowEngine";
 
+
 // Shared bridge so AiDraggableWindow can also trigger Step 3 with MapPreview's exact unhidden pins
 export const mapStep3Bridge = {
   triggerStep3: null,
@@ -161,6 +162,7 @@ export default function MapPreview({
   const [hiddenAiPins, setHiddenAiPins] = useState([]);
   const [isRunningStep3, setIsRunningStep3] = useState(false);
   const [pinsModifiedSinceStep3, setPinsModifiedSinceStep3] = useState(false);
+  const [isStep3Locked, setIsStep3Locked] = useState(false);
 
   const sidebarListRef = useRef(null);
   const sidebarItemRefs = useRef([]);
@@ -251,6 +253,7 @@ export default function MapPreview({
 
       setHiddenAiPins(autoHiddenIndices);
       setPinsModifiedSinceStep3(false);
+      setIsStep3Locked(false);
     }
   }, [aiPinsSignature]);
 
@@ -370,32 +373,41 @@ export default function MapPreview({
   }, [unhiddenAiPinsList, intentData, userPoint, viewportBounds]);
 
   // Handler to execute Step 3 using ONLY the currently unhidden AI pins and live map circles
+  // Handler to execute Step 3 using ONLY the currently unhidden AI pins and live map circles
   const handleTriggerStep3 = async () => {
     const activeProjectId = aiResult?.projectId || aiResult?.pendingStep3Context?.projectId;
     const activeParsedTask = aiResult?.parsedData;
     const updateCallback = aiResult?.onStep3Update;
+    // Keep only Steps 1 & 2 as the base so retrying Step 3 never duplicates or loses them
+    const baseSteps = Array.isArray(aiResult?.steps) ? aiResult.steps.slice(0, 2) : [];
 
-    if (!activeProjectId || !activeParsedTask || !aiResult?.steps) {
-      console.warn("Missing projectId or parsedData on aiResult to run Step 3.");
+    if (!activeProjectId || !activeParsedTask || baseSteps.length < 2) {
+      console.warn("Missing projectId or Steps 1-2 on aiResult to run Step 3.");
       return;
     }
 
     setIsRunningStep3(true);
     if (updateCallback) {
-      updateCallback({ ...aiResult, status: "running_step3" });
+      updateCallback({
+        ...aiResult,
+        steps: baseSteps,
+        status: "running_step3",
+        error: null,
+      });
     }
 
     try {
       const updatedWorkflow = await runStep3FinalEvaluation({
         projectId: activeProjectId,
         parsedTask: activeParsedTask,
-        previousSteps: aiResult.steps,
+        previousSteps: baseSteps,
         unhiddenAiPins: unhiddenAiPinsList,
         viewportBounds,
         onStepComplete: (newRes) => {
           if (updateCallback) {
             updateCallback({
               ...newRes,
+              steps: newRes.steps || baseSteps,
               projectId: activeProjectId,
               onStep3Update: updateCallback,
             });
@@ -403,16 +415,42 @@ export default function MapPreview({
         },
       });
 
+      if (updatedWorkflow?.status === "error" || updatedWorkflow?.error) {
+        // Preserve Steps 1 & 2 on error!
+        if (updateCallback) {
+          updateCallback({
+            ...aiResult,
+            steps: baseSteps,
+            status: "error",
+            error: updatedWorkflow.error || "Step 3 failed to execute.",
+            projectId: activeProjectId,
+            onStep3Update: updateCallback,
+          });
+        }
+      } else {
+        if (updateCallback) {
+          updateCallback({
+            ...updatedWorkflow,
+            projectId: activeProjectId,
+            onStep3Update: updateCallback,
+          });
+        }
+        setPinsModifiedSinceStep3(false);
+        // AUTO-LOCK Step 3 button once Step 3 completes!
+        setIsStep3Locked(true);
+      }
+    } catch (err) {
+      console.error("Failed to run Step 3:", err);
       if (updateCallback) {
         updateCallback({
-          ...updatedWorkflow,
+          ...aiResult,
+          steps: baseSteps,
+          status: "error",
+          error: err.message || "Step 3 failed.",
           projectId: activeProjectId,
           onStep3Update: updateCallback,
         });
       }
-      setPinsModifiedSinceStep3(false);
-    } catch (err) {
-      console.error("Failed to run Step 3:", err);
     } finally {
       setIsRunningStep3(false);
     }
@@ -496,22 +534,57 @@ export default function MapPreview({
               </div>
             )}
 
-            {/* Confirm Pins & Run / Re-Run Step 3 Button */}
-            <button
-              onClick={handleTriggerStep3}
-              disabled={isRunningStep3}
-              className={`w-full py-2 px-3 rounded-xl font-extrabold text-xs shadow-md transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
-                aiResult?.status === "awaiting_step3_confirmation" || pinsModifiedSinceStep3
-                  ? "bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 animate-pulse"
-                  : "bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white"
-              } disabled:opacity-50`}
-            >
-              {isRunningStep3
-                ? "⏳ Evaluating Step 3..."
-                : aiResult?.status === "awaiting_step3_confirmation"
-                ? `⚡ Confirm Pins (${unhiddenAiPinsList.length}) & Run Step 3`
-                : `✓ Re-Run Step 3 Rating (${unhiddenAiPinsList.length})`}
-            </button>
+           {/* Confirm Pins & Run / Re-Run Step 3 Button with Quota-Protection Lock */}
+            {(() => {
+              const hasStep3Finished =
+                aiResult?.steps?.length >= 3 && aiResult?.status === "complete";
+              const isButtonLocked = hasStep3Finished && isStep3Locked;
+
+              return (
+                <div className="flex items-center gap-1.5">
+                  <button
+                    onClick={handleTriggerStep3}
+                    disabled={isRunningStep3 || isButtonLocked}
+                    className={`flex-1 py-2 px-3 rounded-xl font-extrabold text-xs shadow-md transition-all flex items-center justify-center gap-1.5 ${
+                      isButtonLocked
+                        ? "bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed"
+                        : aiResult?.status === "awaiting_step3_confirmation" ||
+                          pinsModifiedSinceStep3
+                        ? "bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 animate-pulse cursor-pointer"
+                        : "bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white cursor-pointer"
+                    } disabled:opacity-60`}
+                  >
+                    {isRunningStep3
+                      ? "⏳ Evaluating Step 3..."
+                      : isButtonLocked
+                      ? `🔒 Step 3 Rated (${unhiddenAiPinsList.length} Pins)`
+                      : aiResult?.status === "awaiting_step3_confirmation"
+                      ? `⚡ Confirm Pins (${unhiddenAiPinsList.length}) & Run Step 3`
+                      : `↻ Re-Run Step 3 (${unhiddenAiPinsList.length})`}
+                  </button>
+
+                  {/* Lock / Unlock Toggle Button (Appears once Step 3 has completed) */}
+                  {hasStep3Finished && (
+                    <button
+                      type="button"
+                      onClick={() => setIsStep3Locked((prev) => !prev)}
+                      title={
+                        isStep3Locked
+                          ? "Unlock to allow re-running Step 3"
+                          : "Lock to prevent accidental API calls"
+                      }
+                      className={`py-2 px-2.5 rounded-xl font-extrabold text-[11px] border transition-all cursor-pointer shrink-0 flex items-center gap-1 ${
+                        isStep3Locked
+                          ? "bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border-amber-500/40"
+                          : "bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700"
+                      }`}
+                    >
+                      {isStep3Locked ? "🔓 Unlock" : "🔒 Lock"}
+                    </button>
+                  )}
+                </div>
+              );
+            })()}
           </div>
 
           {/* PRO SCROLLABLE REAL-WORLD PIN LIST (Color-Coded by Circle Ring!) */}
