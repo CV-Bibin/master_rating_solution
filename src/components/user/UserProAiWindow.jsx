@@ -297,7 +297,14 @@ function ProStep2Card({ data, step1Data }) {
   const [expanded, setExpanded] = useState(false);
 
   const root = data?.realWorldDiscovery || data || {};
-  const matches = Array.isArray(root.topMatches) ? root.topMatches : [];
+  const rawMatches =
+    root.topMatches ||
+    root.matches ||
+    root.realWorldResults ||
+    root.discoveredPlaces ||
+    root.places ||
+    [];
+  const matches = Array.isArray(rawMatches) ? rawMatches : [];
 
   const step1Root = step1Data?.queryAnalysis || step1Data?.visualRouting || step1Data || {};
   const vStatus = String(
@@ -325,6 +332,7 @@ function ProStep2Card({ data, step1Data }) {
   const relevantMatches = matches.filter(
     (m) => m.isRelevant !== false && String(m.isRelevant).toLowerCase() !== "false"
   );
+  const autoHiddenCount = matches.length - relevantMatches.length;
 
   const liveCircles = mapStep3Bridge?.liveCircles;
   const sortedDists = relevantMatches
@@ -350,22 +358,33 @@ function ProStep2Card({ data, step1Data }) {
             Real-World Ground Truth Pins
           </span>
         </div>
-        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-purple-500/15 text-purple-300 border border-purple-500/30">
-          {matches.length} Plotted on Map
-        </span>
+        <div className="flex items-center gap-1.5">
+          {autoHiddenCount > 0 && (
+            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30">
+              {autoHiddenCount} Auto-Hidden
+            </span>
+          )}
+          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-purple-500/15 text-purple-300 border border-purple-500/30">
+            {relevantMatches.length} Active / {matches.length} Total
+          </span>
+        </div>
       </div>
 
       <div className="p-3.5 space-y-3">
-        <div className="grid grid-cols-3 gap-2 text-center">
+        <div className="grid grid-cols-4 gap-2 text-center">
           <div className="bg-slate-950 border border-slate-800 rounded-lg p-2">
             <div className="text-sm font-extrabold text-purple-400">{matches.length}</div>
-            <div className="text-[10px] font-semibold text-slate-400">Total Pins</div>
+            <div className="text-[10px] font-semibold text-slate-400">Total Found</div>
           </div>
           <div className="bg-slate-950 border border-slate-800 rounded-lg p-2">
             <div className="text-sm font-extrabold text-emerald-400">
               {relevantMatches.length}
             </div>
-            <div className="text-[10px] font-semibold text-slate-400">Valid Matches</div>
+            <div className="text-[10px] font-semibold text-slate-400">Active Pins</div>
+          </div>
+          <div className="bg-slate-950 border border-slate-800 rounded-lg p-2">
+            <div className="text-sm font-extrabold text-amber-400">{autoHiddenCount}</div>
+            <div className="text-[10px] font-semibold text-slate-400">Hidden</div>
           </div>
           <div className="bg-slate-950 border border-slate-800 rounded-lg p-2">
             <div className="text-sm font-extrabold text-sky-400">{insideCount}</div>
@@ -382,17 +401,27 @@ function ProStep2Card({ data, step1Data }) {
             >
               <span>
                 {expanded
-                  ? `Hide Discovered Real-World Locations (${matches.length})`
-                  : `Inspect ${matches.length} Discovered Real-World Locations`}
+                  ? `Hide All ${matches.length} Discovered Locations (${autoHiddenCount} Hidden Included)`
+                  : `Inspect All ${matches.length} Locations (${relevantMatches.length} Active, ${autoHiddenCount} Hidden)`}
               </span>
               <span className="text-slate-400">{expanded ? "▲" : "▼"}</span>
             </button>
 
             {expanded && (
-              <div className="mt-2 max-h-60 overflow-y-auto space-y-2 pr-1 custom-scrollbar">
+              <div className="mt-2 max-h-64 overflow-y-auto space-y-2 pr-1 custom-scrollbar">
                 {matches.map((m, idx) => {
+                  const isAutoHidden =
+                    m.isRelevant === false || String(m.isRelevant).toLowerCase() === "false";
+
                   let zone;
-                  if (isExplicitLocationMode) {
+                  if (isAutoHidden) {
+                    zone = {
+                      label: "🚫 Auto-Hidden (Irrelevant)",
+                      card: "bg-slate-950/70 border-rose-500/35 opacity-80",
+                      badge: "bg-rose-500/20 text-rose-300 border-rose-500/40",
+                      rankBg: "bg-slate-700 text-slate-300",
+                    };
+                  } else if (isExplicitLocationMode) {
                     const inside = isMatchInsideLocality(m);
                     zone = inside
                       ? {
@@ -427,7 +456,11 @@ function ProStep2Card({ data, step1Data }) {
                             {idx + 1}
                           </span>
                           <div className="min-w-0">
-                            <div className="text-xs font-extrabold text-white truncate">
+                            <div
+                              className={`text-xs font-extrabold truncate ${
+                                isAutoHidden ? "line-through text-slate-400" : "text-white"
+                              }`}
+                            >
                               {m.realWorldName || m.name}
                             </div>
                             <div className="flex flex-wrap items-center gap-1.5 mt-1">
@@ -455,6 +488,15 @@ function ProStep2Card({ data, step1Data }) {
                       <div className="text-[10px] text-slate-300/90 mt-1.5 pl-8 leading-snug">
                         {m.realWorldAddress || m.address}
                       </div>
+
+                      {isAutoHidden && m.relevanceReason && (
+                        <div className="mt-1.5 ml-8 p-1.5 rounded bg-rose-950/50 border border-rose-500/30 text-[10px] text-rose-200 leading-snug">
+                          <strong className="uppercase text-[9px] text-rose-400 mr-1">
+                            Why Hidden:
+                          </strong>
+                          {m.relevanceReason}
+                        </div>
+                      )}
                     </div>
                   );
                 })}

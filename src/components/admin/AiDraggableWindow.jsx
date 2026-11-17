@@ -3,7 +3,7 @@ import React, { useState, useEffect, useRef } from "react";
 import { mapStep3Bridge } from "../taskViewers/MapPreview";
 
 // ==========================================
-// BEAUTIFUL JSON RENDERER (ADMIN DEBUG VIEW)
+// BEAUTIFUL DETAILED JSON RENDERER (ADMIN ONLY)
 // ==========================================
 const StructuredValue = ({ value }) => {
   if (value === null || value === undefined) return <span className="text-slate-400 italic">None</span>;
@@ -131,20 +131,20 @@ export default function AiDraggableWindow({ result, onClose }) {
       >
         <div className="flex items-center gap-2">
           <span className="text-blue-400 text-lg leading-none">✨</span>
-          <h3 className="font-bold text-sm tracking-wide select-none">AI Workflow Output (Admin)</h3>
+          <h3 className="font-bold text-sm tracking-wide select-none">AI Workflow Output</h3>
         </div>
 
         <div className="flex gap-2">
           <button
             onClick={() => setIsMinimized(!isMinimized)}
-            className="w-6 h-6 flex items-center justify-center rounded hover:bg-slate-700 text-slate-300 transition-colors"
+            className="w-6 h-6 flex items-center justify-center rounded hover:bg-slate-700 text-slate-300 transition-colors cursor-pointer"
           >
             {isMinimized ? "◻" : "—"}
           </button>
 
           <button
             onClick={onClose}
-            className="w-6 h-6 flex items-center justify-center rounded hover:bg-red-500 hover:text-white text-slate-300 transition-colors"
+            className="w-6 h-6 flex items-center justify-center rounded hover:bg-red-500 hover:text-white text-slate-300 transition-colors cursor-pointer"
           >
             ✕
           </button>
@@ -206,7 +206,7 @@ export default function AiDraggableWindow({ result, onClose }) {
             </div>
           )}
 
-         {/* Map through completed steps dynamically */}
+          {/* Map through completed steps dynamically */}
           {result?.steps?.map((step, idx) => {
             let parsedJSON = {};
             try {
@@ -217,7 +217,6 @@ export default function AiDraggableWindow({ result, onClose }) {
                 text = text.substring(start, end + 1);
               }
               text = text.replace(/,\s*([}\]])/g, "$1");
-              
               parsedJSON = JSON.parse(text);
               if (parsedJSON.queryAnalysis) parsedJSON = parsedJSON.queryAnalysis;
               if (parsedJSON.realWorldDiscovery) parsedJSON = parsedJSON.realWorldDiscovery;

@@ -162,9 +162,9 @@ export function calculateDistance(lat1, lon1, lat2, lon2) {
   const a =
     Math.sin(dLat / 2) * Math.sin(dLat / 2) +
     Math.cos((lat1 * Math.PI) / 180) *
-      Math.cos((lat2 * Math.PI) / 180) *
-      Math.sin(dLon / 2) *
-      Math.sin(dLon / 2);
+    Math.cos((lat2 * Math.PI) / 180) *
+    Math.sin(dLon / 2) *
+    Math.sin(dLon / 2);
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c;
 }
@@ -539,17 +539,17 @@ Return only the result requested by this workflow step.
 
           const vStatus = String(
             extractDeepValue(parsedResult, "viewportStatus") ||
-              extractDeepValue(parsedResult, "locationIntent") ||
-              ""
+            extractDeepValue(parsedResult, "locationIntent") ||
+            ""
           ).toUpperCase();
 
           const isExplicitLoc =
             vStatus.includes("EXPLICIT") ||
             Boolean(
               cityName &&
-                typeof cityName === "string" &&
-                cityName.trim().toLowerCase() !== "null" &&
-                cityName.trim().toLowerCase() !== "none"
+              typeof cityName === "string" &&
+              cityName.trim().toLowerCase() !== "null" &&
+              cityName.trim().toLowerCase() !== "none"
             );
 
           // 1. If Explicit Location (famous OR non-famous like "Vengara"), geocode the town name directly
@@ -570,8 +570,8 @@ Return only the result requested by this workflow step.
           if (!anchorCoords) {
             anchorCoords = safeExtractLatLng(
               extractDeepValue(parsedResult, "anchorCoordinates") ||
-                parsedTask.viewportCenter ||
-                parsedTask.userLatLng
+              parsedTask.viewportCenter ||
+              parsedTask.userLatLng
             );
           }
 
@@ -611,9 +611,9 @@ Return only the result requested by this workflow step.
             if (isExplicitLoc && Array.isArray(liveMapsData) && liveMapsData.length > 0) {
               const firstPt = safeExtractLatLng(
                 liveMapsData[0].realWorldLatLng ||
-                  liveMapsData[0].lat_lng ||
-                  liveMapsData[0].coordinates ||
-                  liveMapsData[0].location
+                liveMapsData[0].lat_lng ||
+                liveMapsData[0].coordinates ||
+                liveMapsData[0].location
               );
               if (firstPt && anchorCoords) {
                 const distFromOldAnchor = calculateDistance(
@@ -757,8 +757,8 @@ export async function runStep3FinalEvaluation({
     const step1Json = JSON.parse(cleanJsonResponse(previousSteps[0].result));
     let anchorCoords = safeExtractLatLng(
       extractDeepValue(step1Json, "anchorCoordinates") ||
-        parsedTask.viewportCenter ||
-        parsedTask.userLatLng
+      parsedTask.viewportCenter ||
+      parsedTask.userLatLng
     );
 
     const viewportStatusStr = String(
@@ -1001,6 +1001,10 @@ export async function runStep3FinalEvaluation({
         let zoneRatingCap = "";
         let borderlineGuidance = "High Confidence (Clear Zone)";
 
+       const r1Tolerance = Math.max(0.35, circleData.r1Km * 0.15);
+        const r2Tolerance = Math.max(0.45, circleData.r2Km * 0.15);
+        const r3Tolerance = Math.max(0.60, circleData.r3Km * 0.15);
+
         if (circleData.mode === "FRESH_OUTSIDE_WITH_INSIDE_PINS") {
           if (isInsideViewportBox) {
             mapZone = "GREEN_RECTANGLE (0 km — Strictly Inside Fresh Viewport)";
@@ -1008,47 +1012,76 @@ export async function runStep3FinalEvaluation({
           } else if (effectiveDistKm <= circleData.r2Km) {
             mapZone = `YELLOW_WALL_BUFFER_R2 (${effectiveDistKm} km outside viewport wall, <= ${circleData.r2Km} km)`;
             zoneRatingCap = "Demote by 1 for Distance -> Good (Distance/Prominence Issue)";
-            if (effectiveDistKm >= circleData.r2Km * 0.85 || closerUnhiddenCount >= 4) {
-              borderlineGuidance = `BORDERLINE GOOD / ACCEPTABLE: Candidate (${effectiveDistKm} km from viewport wall) is near the outer boundary of the Good buffer (${circleData.r2Km} km) with ${closerUnhiddenCount} closer real-world options. Primary rating: Good, Alternative rating: Acceptable (Distance/Prominence Issue).`;
+
+            const distToViewportWall = +effectiveDistKm.toFixed(2);
+            const distToOuterOrange = +(circleData.r2Km - effectiveDistKm).toFixed(2);
+
+            if (distToViewportWall <= distToOuterOrange && distToViewportWall <= r2Tolerance) {
+              borderlineGuidance = `BORDERLINE GOOD / EXCELLENT: Candidate (${effectiveDistKm} km outside viewport wall) is only ${distToViewportWall} km from the Green Fresh Viewport boundary, much closer to Green than Orange (${circleData.r2Km} km). Primary rating: Good (Distance/Prominence Issue), Alternative rating: Excellent.`;
+            } else if (distToOuterOrange < distToViewportWall && distToOuterOrange <= r2Tolerance) {
+              borderlineGuidance = `BORDERLINE GOOD / ACCEPTABLE: Candidate (${effectiveDistKm} km from viewport wall) is only ${distToOuterOrange} km inside the outer boundary of the Good buffer (${circleData.r2Km} km). Primary rating: Good (Distance/Prominence Issue), Alternative rating: Acceptable (Distance/Prominence Issue).`;
             }
           } else if (effectiveDistKm <= circleData.r3Km) {
             mapZone = `ORANGE_WALL_BUFFER_R3 (${effectiveDistKm} km outside viewport wall, <= ${circleData.r3Km} km)`;
             zoneRatingCap = "Demote by 2 for Distance -> Acceptable (Distance/Prominence Issue)";
-            if (effectiveDistKm <= circleData.r2Km * 1.15) {
-              borderlineGuidance = `BORDERLINE ACCEPTABLE / GOOD: Candidate (${effectiveDistKm} km from viewport wall) sits right near the boundary of the Good buffer (${circleData.r2Km} km). Primary rating: Acceptable, Alternative rating: Good (Distance/Prominence Issue).`;
-            } else if (effectiveDistKm >= circleData.r3Km * 0.85 || closerUnhiddenCount >= 6) {
-              borderlineGuidance = `BORDERLINE ACCEPTABLE / BAD: Candidate (${effectiveDistKm} km) is near the outer limit of the Acceptable buffer (${circleData.r3Km} km) with ${closerUnhiddenCount} closer options. Primary rating: Acceptable, Alternative rating: Bad (Distance/Prominence Issue).`;
+
+            const distToInnerYellow = +(effectiveDistKm - circleData.r2Km).toFixed(2);
+            const distToOuterLimit = +(circleData.r3Km - effectiveDistKm).toFixed(2);
+
+            if (distToInnerYellow <= distToOuterLimit && distToInnerYellow <= r3Tolerance) {
+              borderlineGuidance = `BORDERLINE ACCEPTABLE / GOOD: Candidate (${effectiveDistKm} km from viewport wall) is only ${distToInnerYellow} km past the Good buffer boundary (${circleData.r2Km} km). Primary rating: Acceptable (Distance/Prominence Issue), Alternative rating: Good (Distance/Prominence Issue).`;
+            } else if (distToOuterLimit < distToInnerYellow && distToOuterLimit <= r3Tolerance) {
+              borderlineGuidance = `BORDERLINE ACCEPTABLE / BAD: Candidate (${effectiveDistKm} km) is only ${distToOuterLimit} km inside the outer limit of the Acceptable buffer (${circleData.r3Km} km). Primary rating: Acceptable (Distance/Prominence Issue), Alternative rating: Bad (Distance/Prominence Issue).`;
             }
           } else {
+            const distPastR3 = +(effectiveDistKm - circleData.r3Km).toFixed(2);
             mapZone = `OUTSIDE_ALL_CIRCLES (> ${circleData.r3Km} km outside viewport wall — Beyond Outer Buffer)`;
             zoneRatingCap = `MUST RATE BAD (Distance/Prominence Issue) — ${effectiveDistKm} km outside viewport wall is beyond all relevance zones and skipped ${closerUnhiddenCount} closer unhidden real-world branches!`;
+
+            if (distPastR3 <= r3Tolerance) {
+              borderlineGuidance = `BORDERLINE BAD / ACCEPTABLE: Candidate (${effectiveDistKm} km from viewport wall) is only ${distPastR3} km outside the Acceptable buffer (${circleData.r3Km} km). Primary rating: Bad (Distance/Prominence Issue), Alternative rating: Acceptable (Distance/Prominence Issue).`;
+            }
           }
         } else {
           if (effectiveDistKm <= circleData.r1Km) {
             mapZone = `GREEN_CIRCLE_R1 (<= ${circleData.r1Km} km)`;
             zoneRatingCap = "Eligible for Excellent (or Navigational if unique)";
-            if (effectiveDistKm >= circleData.r1Km * 0.85 && closerUnhiddenCount >= 2) {
-              borderlineGuidance = `BORDERLINE EXCELLENT / GOOD: Candidate (${effectiveDistKm} km) is near the outer boundary of Green r1 (${circleData.r1Km} km). Primary rating: Excellent, Alternative rating: Good (Distance/Prominence Issue).`;
+
+            const distToR1 = +(circleData.r1Km - effectiveDistKm).toFixed(2);
+            if (distToR1 <= r1Tolerance && closerUnhiddenCount >= 1) {
+              borderlineGuidance = `BORDERLINE EXCELLENT / GOOD: Candidate (${effectiveDistKm} km) is only ${distToR1} km inside the outer boundary of Green r1 (${circleData.r1Km} km). Primary rating: Excellent, Alternative rating: Good (Distance/Prominence Issue).`;
             }
           } else if (effectiveDistKm <= circleData.r2Km) {
             mapZone = `YELLOW_CIRCLE_R2 (${circleData.r1Km} km to ${circleData.r2Km} km)`;
             zoneRatingCap = "MUST DEMOTE to Good (Distance/Prominence Issue)";
-            if (effectiveDistKm >= circleData.r2Km * 0.85 || closerUnhiddenCount >= 4) {
-              borderlineGuidance = `BORDERLINE GOOD / ACCEPTABLE: Candidate (${effectiveDistKm} km) is near the boundary of Yellow r2 (${circleData.r2Km} km) and ${closerUnhiddenCount} closer real-world options exist. Primary rating: Good, Alternative rating: Acceptable (Distance/Prominence Issue).`;
+
+            const distToInnerGreen = +(effectiveDistKm - circleData.r1Km).toFixed(2);
+            const distToOuterOrange = +(circleData.r2Km - effectiveDistKm).toFixed(2);
+
+            if (distToInnerGreen <= distToOuterOrange && distToInnerGreen <= r2Tolerance) {
+              borderlineGuidance = `BORDERLINE GOOD / EXCELLENT: Candidate (${effectiveDistKm} km) is only ${distToInnerGreen} km outside the Green r1 boundary (${circleData.r1Km} km), much closer to Green than Orange (${circleData.r2Km} km). Primary rating: Good (Distance/Prominence Issue), Alternative rating: Excellent.`;
+            } else if (distToOuterOrange < distToInnerGreen && distToOuterOrange <= r2Tolerance) {
+              borderlineGuidance = `BORDERLINE GOOD / ACCEPTABLE: Candidate (${effectiveDistKm} km) is only ${distToOuterOrange} km inside the outer boundary of Yellow r2 (${circleData.r2Km} km). Primary rating: Good (Distance/Prominence Issue), Alternative rating: Acceptable (Distance/Prominence Issue).`;
             }
           } else if (effectiveDistKm <= circleData.r3Km) {
             mapZone = `ORANGE_CIRCLE_R3 (${circleData.r2Km} km to ${circleData.r3Km} km)`;
             zoneRatingCap = "MUST DEMOTE to Acceptable (Distance/Prominence Issue)";
-            if (effectiveDistKm <= circleData.r2Km * 1.15) {
-              borderlineGuidance = `BORDERLINE ACCEPTABLE / GOOD: Candidate (${effectiveDistKm} km) is just past the Yellow r2 boundary (${circleData.r2Km} km). Primary rating: Acceptable, Alternative rating: Good (Distance/Prominence Issue).`;
-            } else if (effectiveDistKm >= circleData.r3Km * 0.85 || closerUnhiddenCount >= 6) {
-              borderlineGuidance = `BORDERLINE ACCEPTABLE / BAD: Candidate (${effectiveDistKm} km) is near the outer boundary of Orange r3 (${circleData.r3Km} km) with ${closerUnhiddenCount} closer options. Primary rating: Acceptable, Alternative rating: ${
+
+            const distToInnerYellow = +(effectiveDistKm - circleData.r2Km).toFixed(2);
+            const distToOuterLimit = +(circleData.r3Km - effectiveDistKm).toFixed(2);
+
+            if (distToInnerYellow <= distToOuterLimit && distToInnerYellow <= r3Tolerance) {
+              borderlineGuidance = `BORDERLINE ACCEPTABLE / GOOD: Candidate (${effectiveDistKm} km) is only ${distToInnerYellow} km past the Yellow r2 boundary (${circleData.r2Km} km). Primary rating: Acceptable (Distance/Prominence Issue), Alternative rating: Good (Distance/Prominence Issue).`;
+            } else if (distToOuterLimit < distToInnerYellow && distToOuterLimit <= r3Tolerance) {
+              borderlineGuidance = `BORDERLINE ACCEPTABLE / BAD: Candidate (${effectiveDistKm} km) is only ${distToOuterLimit} km inside the outer boundary of Orange r3 (${circleData.r3Km} km). Primary rating: Acceptable (Distance/Prominence Issue), Alternative rating: ${
                 isFreshInsideUserInside && isInsideViewportBox
                   ? "Acceptable (Protected by Fresh Viewport Floor — cannot be Bad for distance)"
                   : "Bad (Distance/Prominence Issue)"
               }.`;
             }
           } else {
+            const distPastR3 = +(effectiveDistKm - circleData.r3Km).toFixed(2);
+
             if (isFreshInsideUserInside && isInsideViewportBox) {
               mapZone = `INSIDE_FRESH_VIEWPORT_BEYOND_R3 (${effectiveDistKm} km from user, > ${circleData.r3Km} km r3 circle, but STRICTLY INSIDE Fresh Viewport Box)`;
               zoneRatingCap = `VIEWPORT PROTECTION RULE ACTIVE: Because this candidate is strictly INSIDE the Fresh Viewport rectangle (with User Inside), it CANNOT be rated Bad for distance! Maximum distance demotion is ACCEPTABLE ("Distance/Prominence Issue") — unless it has a User Intent Issue.`;
@@ -1056,6 +1089,10 @@ export async function runStep3FinalEvaluation({
             } else {
               mapZone = `OUTSIDE_ALL_CIRCLES (> ${circleData.r3Km} km — Beyond Outer Circle r3 and Outside Viewport)`;
               zoneRatingCap = `MUST RATE BAD (Distance/Prominence Issue) — candidate is at ${effectiveDistKm} km, completely outside the outer circle (${circleData.r3Km} km) and outside the viewport, skipping ${closerUnhiddenCount} closer unhidden real-world branches!`;
+
+              if (distPastR3 <= r3Tolerance) {
+                borderlineGuidance = `BORDERLINE BAD / ACCEPTABLE: Candidate (${effectiveDistKm} km) is only ${distPastR3} km outside the Orange r3 boundary (${circleData.r3Km} km). Primary rating: Bad (Distance/Prominence Issue), Alternative rating: Acceptable (Distance/Prominence Issue).`;
+              }
             }
           }
         }
