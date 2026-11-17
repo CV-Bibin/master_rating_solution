@@ -5,7 +5,7 @@ import { GoogleGenAI } from "@google/genai";
 // 1. API KEY SETUP & PARSING
 // ==========================================
 const groqKeysString =
-  import.meta.env.VITE_GROQ_API_KEYS ||
+  import.meta.env.GROQ_API_KEYS ||
   import.meta.env.VITE_GROQ_API_KEY ||
   "";
 
