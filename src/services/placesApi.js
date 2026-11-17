@@ -53,6 +53,10 @@ export async function searchNearbyPlaces(searchQuery, locationString = "", inten
   const url = 'https://places.googleapis.com/v1/places:searchText';
   const requestBody = { textQuery: cleanQuery };
 
+  console.log("========== GOOGLE MAPS QUERY ==========");
+console.log("Query sent to Maps API:", requestBody.textQuery);
+console.log("=======================================");
+
   // Pass coordinates explicitly into locationBias so Google prioritizes true proximity
   if (anchorLat !== null && anchorLng !== null) {
     requestBody.locationBias = {

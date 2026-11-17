@@ -173,36 +173,68 @@ export default function MapPreview({
   const userPoint = parseLatLng(userLatLng);
   const isFreshOrEmpty = !viewportAge || viewportAge.toLowerCase() === "fresh";
 
-  const aiPins = useMemo(() => {
+ const aiPins = useMemo(() => {
     if (!aiResult || !aiResult.steps) return [];
     let discoveredPins = [];
 
-    aiResult.steps.forEach(step => {
+    aiResult.steps.forEach((step) => {
+      if (!step?.result) return;
       try {
-        const cleanText = step.result.replace(/```json/i, "").replace(/```/g, "").trim();
-        const parsed = JSON.parse(cleanText);
-        const matches = parsed?.realWorldDiscovery?.topMatches || parsed?.topMatches || [];
+        let text = String(step.result).trim();
+        const start = text.indexOf("{");
+        const end = text.lastIndexOf("}");
+        if (start !== -1 && end !== -1 && end > start) {
+          text = text.substring(start, end + 1);
+        }
+        text = text.replace(/,\s*([}\]])/g, "$1");
 
-        matches.forEach(match => {
-          const pt = parseLatLng(match.realWorldLatLng);
-          if (pt) {
+        const parsed = JSON.parse(text);
+        const matches =
+          parsed?.realWorldDiscovery?.topMatches || parsed?.topMatches || [];
+
+        matches.forEach((match) => {
+          // ✅ FIXED: Use `parseLatLng` (imported from viewportEstimator) which returns { lat, lng }!
+          const rawCoord =
+            match.realWorldLatLng ||
+            match.lat_lng ||
+            match.latLng ||
+            match.coordinates ||
+            match.location;
+
+          const pt =
+            typeof rawCoord === "object" &&
+            rawCoord !== null &&
+            rawCoord.lat !== undefined &&
+            rawCoord.lng !== undefined
+              ? { lat: parseFloat(rawCoord.lat), lng: parseFloat(rawCoord.lng) }
+              : parseLatLng(rawCoord);
+
+          if (pt && Number.isFinite(pt.lat) && Number.isFinite(pt.lng)) {
             discoveredPins.push({ ...match, point: pt });
           }
         });
-      } catch (e) {}
+      } catch (e) {
+        console.error("MapPreview failed to parse AI pins:", e);
+      }
     });
     return discoveredPins;
   }, [aiResult]);
 
   const intentData = useMemo(() => {
     if (!aiResult || !aiResult.steps) return null;
-
     let mergedData = {};
 
     for (const step of aiResult.steps) {
       try {
-        const cleanText = step.result.replace(/```json/i, "").replace(/```/g, "").trim();
-        const parsed = JSON.parse(cleanText);
+        let text = String(step.result).trim();
+        const start = text.indexOf("{");
+        const end = text.lastIndexOf("}");
+        if (start !== -1 && end !== -1 && end > start) {
+          text = text.substring(start, end + 1);
+        }
+        text = text.replace(/,\s*([}\]])/g, "$1");
+        
+        const parsed = JSON.parse(text);
 
         if (parsed.AnchorCoordinates || parsed.anchorCoordinates || parsed.sanitizedQuery || parsed.queryType || parsed.QueryType) {
           let coords = parsed.AnchorCoordinates || parsed.anchorCoordinates;
@@ -225,7 +257,8 @@ export default function MapPreview({
           mergedData.boundaryHighlight = parsed.boundaryHighlight
             || parsed["boundary Highlight"]
             || parsed.boundary_highlight
-            || parsed.Boundary;
+            || parsed.Boundary
+            || parsed.explicitLocationModifier;
         }
       } catch (e) {}
     }
@@ -479,237 +512,310 @@ export default function MapPreview({
         </select>
       </div>
 
-     {/* PRO FLOATING LEFT SIDEBAR: REAL-WORLD RESULTS & LIVE CIRCLE ZONES */}
-      {aiPins.length > 0 && showAiPins && (
-        <div className="absolute top-14 left-3 z-[1000] w-80 max-h-[calc(100%-70px)] bg-slate-950/95 backdrop-blur-md border border-slate-800 rounded-2xl shadow-2xl flex flex-col overflow-hidden text-slate-100">
-          {/* TOP PORTION: Real-World Results Header + Live r1/r2/r3 Circle Badges + Step 3 Button */}
-          <div className="bg-slate-900 p-3.5 border-b border-slate-800 shrink-0 space-y-2.5">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <span className="text-sm">🌍</span>
-                <span className="font-extrabold text-xs tracking-wide text-white">
-                  Real-World Results
-                </span>
-              </div>
-              <div className="flex items-center gap-1.5">
-                {hiddenAiPins.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setHiddenAiPins([]);
-                      setPinsModifiedSinceStep3(true);
-                    }}
-                    className="text-[10px] bg-slate-800 hover:bg-slate-700 text-amber-300 px-2 py-0.5 rounded-full border border-slate-700 font-bold cursor-pointer"
-                  >
-                    Restore {hiddenAiPins.length} Hidden
-                  </button>
-                )}
-                <span className="bg-purple-600 text-white text-[11px] px-2.5 py-0.5 rounded-full font-extrabold shadow">
-                  {unhiddenAiPinsList.length}
-                </span>
-              </div>
-            </div>
+    {/* PRO FLOATING LEFT SIDEBAR: REAL-WORLD RESULTS (Adapts to Explicit Boundary vs. Radial Circles!) */}
+      {aiPins.length > 0 && showAiPins && (() => {
+        const vStatus = String(intentData?.viewportStatus || intentData?.locationIntent || "").toUpperCase();
+        const boundaryName =
+          intentData?.boundaryHighlight &&
+          String(intentData.boundaryHighlight).toLowerCase() !== "null"
+            ? String(intentData.boundaryHighlight)
+            : "";
+        const isExplicitLocationMode = vStatus.includes("EXPLICIT") || Boolean(boundaryName);
+        const cleanLocalityToken = boundaryName.split(",")[0].trim().toLowerCase();
 
-            {/* Live Circle Radii Pills (Exc r1 / Good r2 / Acc r3) */}
-            {liveCircles && (
-              <div className="grid grid-cols-3 gap-1.5 text-[10px] text-center">
-                <div className="bg-emerald-950/70 border border-emerald-500/40 rounded-lg py-1.5 px-1 text-emerald-300 font-bold">
-                  🟢 Exc (r1)
-                  <div className="text-white font-mono text-[11px] mt-0.5">
-                    {liveCircles.r1Km} km
-                  </div>
-                </div>
-                <div className="bg-amber-950/70 border border-amber-500/40 rounded-lg py-1.5 px-1 text-amber-300 font-bold">
-                  🟡 Good (r2)
-                  <div className="text-white font-mono text-[11px] mt-0.5">
-                    {liveCircles.r2Km} km
-                  </div>
-                </div>
-                <div className="bg-orange-950/70 border border-orange-500/40 rounded-lg py-1.5 px-1 text-orange-300 font-bold">
-                  🟠 Acc (r3)
-                  <div className="text-white font-mono text-[11px] mt-0.5">
-                    {liveCircles.r3Km} km
-                  </div>
-                </div>
-              </div>
-            )}
+        const isPinInsideLocality = (pin) => {
+          const addr = String(pin.realWorldAddress || pin.address || "").toLowerCase();
+          if (cleanLocalityToken && cleanLocalityToken.length >= 2 && addr.includes(cleanLocalityToken)) {
+            return true;
+          }
+          return (
+            pin.isStrictlyInsideLocation !== false &&
+            String(pin.isStrictlyInsideLocation).toLowerCase() !== "false"
+          );
+        };
 
-           {/* Confirm Pins & Run / Re-Run Step 3 Button with Quota-Protection Lock */}
-            {(() => {
-              const hasStep3Finished =
-                aiResult?.steps?.length >= 3 && aiResult?.status === "complete";
-              const isButtonLocked = hasStep3Finished && isStep3Locked;
+        const insideBoundaryCount = unhiddenAiPinsList.filter(isPinInsideLocality).length;
+        const outsideBoundaryCount = unhiddenAiPinsList.length - insideBoundaryCount;
 
-              return (
+        return (
+          <div className="absolute top-14 left-3 z-[1000] w-80 max-h-[calc(100%-70px)] bg-slate-950/95 backdrop-blur-md border border-slate-800 rounded-2xl shadow-2xl flex flex-col overflow-hidden text-slate-100">
+            {/* TOP PORTION: Real-World Results Header + Mode Summary + Step 3 Button */}
+            <div className="bg-slate-900 p-3.5 border-b border-slate-800 shrink-0 space-y-2.5">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm">🌍</span>
+                  <span className="font-extrabold text-xs tracking-wide text-white">
+                    Real-World Results
+                  </span>
+                </div>
                 <div className="flex items-center gap-1.5">
-                  <button
-                    onClick={handleTriggerStep3}
-                    disabled={isRunningStep3 || isButtonLocked}
-                    className={`flex-1 py-2 px-3 rounded-xl font-extrabold text-xs shadow-md transition-all flex items-center justify-center gap-1.5 ${
-                      isButtonLocked
-                        ? "bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed"
-                        : aiResult?.status === "awaiting_step3_confirmation" ||
-                          pinsModifiedSinceStep3
-                        ? "bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 animate-pulse cursor-pointer"
-                        : "bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white cursor-pointer"
-                    } disabled:opacity-60`}
-                  >
-                    {isRunningStep3
-                      ? "⏳ Evaluating Step 3..."
-                      : isButtonLocked
-                      ? `🔒 Step 3 Rated (${unhiddenAiPinsList.length} Pins)`
-                      : aiResult?.status === "awaiting_step3_confirmation"
-                      ? `⚡ Confirm Pins (${unhiddenAiPinsList.length}) & Run Step 3`
-                      : `↻ Re-Run Step 3 (${unhiddenAiPinsList.length})`}
-                  </button>
-
-                  {/* Lock / Unlock Toggle Button (Appears once Step 3 has completed) */}
-                  {hasStep3Finished && (
+                  {hiddenAiPins.length > 0 && (
                     <button
                       type="button"
-                      onClick={() => setIsStep3Locked((prev) => !prev)}
-                      title={
-                        isStep3Locked
-                          ? "Unlock to allow re-running Step 3"
-                          : "Lock to prevent accidental API calls"
-                      }
-                      className={`py-2 px-2.5 rounded-xl font-extrabold text-[11px] border transition-all cursor-pointer shrink-0 flex items-center gap-1 ${
-                        isStep3Locked
-                          ? "bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border-amber-500/40"
-                          : "bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700"
-                      }`}
+                      onClick={() => {
+                        setHiddenAiPins([]);
+                        setPinsModifiedSinceStep3(true);
+                      }}
+                      className="text-[10px] bg-slate-800 hover:bg-slate-700 text-amber-300 px-2 py-0.5 rounded-full border border-slate-700 font-bold cursor-pointer"
                     >
-                      {isStep3Locked ? "🔓 Unlock" : "🔒 Lock"}
+                      Restore {hiddenAiPins.length} Hidden
                     </button>
                   )}
+                  <span className="bg-purple-600 text-white text-[11px] px-2.5 py-0.5 rounded-full font-extrabold shadow">
+                    {unhiddenAiPinsList.length}
+                  </span>
                 </div>
-              );
-            })()}
-          </div>
+              </div>
 
-          {/* PRO SCROLLABLE REAL-WORLD PIN LIST (Color-Coded by Circle Ring!) */}
-          <div
-            ref={sidebarListRef}
-            className="p-2.5 overflow-y-auto space-y-2 flex-1 custom-scrollbar"
-          >
-            {aiPins.map((pin, idx) => {
-              const pinRank = pin.rank ?? idx + 1;
-              const isHidden = hiddenAiPins.includes(idx);
-              const isSelected = activeAiPin === idx;
-              const dist = Number(pin.distanceFromAnchorKm);
-              const r1 = liveCircles?.r1Km ?? 0.5;
-              const r2 = liveCircles?.r2Km ?? 2.0;
-              const r3 = liveCircles?.r3Km ?? 5.0;
-
-              // Determine zone ring color: Green (<= r1), Orange (<= r2), Red (<= r3), Pink (> r3)
-              let zoneBadge = "bg-fuchsia-500/20 text-fuchsia-300 border-fuchsia-500/40";
-              let zoneCard = "bg-slate-900/90 border-fuchsia-500/35 hover:border-fuchsia-400";
-              let rankCircle = "bg-fuchsia-600 text-white";
-              let zoneLabel = "🩷 Bad (>r3)";
-
-              if (Number.isFinite(dist)) {
-                if (dist <= r1) {
-                  zoneBadge = "bg-emerald-500/20 text-emerald-300 border-emerald-500/40";
-                  zoneCard = "bg-slate-900/90 border-emerald-500/40 hover:border-emerald-400";
-                  rankCircle = "bg-emerald-500 text-slate-950";
-                  zoneLabel = "🟢 Exc (r1)";
-                } else if (dist <= r2) {
-                  zoneBadge = "bg-amber-500/20 text-amber-300 border-amber-500/40";
-                  zoneCard = "bg-slate-900/90 border-amber-500/40 hover:border-amber-400";
-                  rankCircle = "bg-amber-500 text-slate-950";
-                  zoneLabel = "🟠 Good (r2)";
-                } else if (dist <= r3) {
-                  zoneBadge = "bg-rose-500/20 text-rose-300 border-rose-500/40";
-                  zoneCard = "bg-slate-900/90 border-rose-500/40 hover:border-rose-400";
-                  rankCircle = "bg-rose-600 text-white";
-                  zoneLabel = "🔴 Acc (r3)";
-                }
-              }
-
-              const categoryText =
-                pin.realWorldCategory || pin.category || pin.type || "Real-World POI";
-
-              return (
-                <div
-                  key={idx}
-                  data-index={idx}
-                  ref={(el) => (sidebarItemRefs.current[idx] = el)}
-                  onClick={() => {
-                    if (!isHidden) {
-                      handleSidebarClick(idx);
-                    }
-                  }}
-                  className={`p-2.5 rounded-xl border transition-all cursor-pointer ${
-                    isHidden
-                      ? "bg-slate-950/40 border-slate-800/60 opacity-45"
-                      : isSelected
-                      ? `${zoneCard} ring-2 ring-sky-400 shadow-lg`
-                      : zoneCard
-                  }`}
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex items-center gap-2 min-w-0">
-                      <span
-                        className={`w-6 h-6 rounded-full text-[10px] font-extrabold flex items-center justify-center shrink-0 shadow ${
-                          isHidden ? "bg-slate-700 text-slate-400" : rankCircle
-                        }`}
-                      >
-                        {pinRank}
-                      </span>
-                      <span
-                        className={`font-extrabold text-xs truncate ${
-                          isHidden ? "line-through text-slate-500" : "text-white"
-                        }`}
-                      >
-                        {pin.realWorldName || pin.name}
-                      </span>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        toggleHidePinByIndex(idx);
-                      }}
-                      className={`px-2 py-0.5 rounded-md text-[10px] font-extrabold border shrink-0 transition-colors cursor-pointer ${
-                        isHidden
-                          ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/40 hover:bg-emerald-500/30"
-                          : "bg-slate-800 text-slate-300 border-slate-700 hover:bg-rose-600 hover:text-white hover:border-rose-500"
-                      }`}
-                    >
-                      {isHidden ? "Unhide" : "Hide"}
-                    </button>
+              {/* MODE A: EXPLICIT LOCATION BOUNDARY SUMMARY (No r1/r2/r3 Circle Demotion Inside Locality!) */}
+              {isExplicitLocationMode ? (
+                <div className="space-y-1.5">
+                  <div className="bg-fuchsia-950/50 border border-fuchsia-500/40 rounded-lg px-2.5 py-1.5 flex items-center justify-between text-[10px]">
+                    <span className="font-bold text-fuchsia-300 uppercase tracking-wider">
+                      🗺️ Boundary Mode
+                    </span>
+                    <span className="font-extrabold text-white truncate max-w-[155px]">
+                      {boundaryName || "Explicit Location"}
+                    </span>
                   </div>
+                  <div className="grid grid-cols-2 gap-1.5 text-[10px] text-center">
+                    <div className="bg-emerald-950/70 border border-emerald-500/40 rounded-lg py-1.5 px-2 text-emerald-300 font-bold">
+                      🟢 Inside Location
+                      <div className="text-white font-extrabold text-[11px] mt-0.5">
+                        {insideBoundaryCount} (Excellent)
+                      </div>
+                    </div>
+                    <div className="bg-slate-800/80 border border-slate-700 rounded-lg py-1.5 px-2 text-slate-300 font-bold">
+                      ⚪ Outside Location
+                      <div className="text-white font-extrabold text-[11px] mt-0.5">
+                        {outsideBoundaryCount} (Demoted)
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                /* MODE B: PROXIMITY / VIEWPORT RADIAL CIRCLES (r1 / r2 / r3) */
+                liveCircles && (
+                  <div className="grid grid-cols-3 gap-1.5 text-[10px] text-center">
+                    <div className="bg-emerald-950/70 border border-emerald-500/40 rounded-lg py-1.5 px-1 text-emerald-300 font-bold">
+                      🟢 Exc (r1)
+                      <div className="text-white font-mono text-[11px] mt-0.5">
+                        {liveCircles.r1Km} km
+                      </div>
+                    </div>
+                    <div className="bg-amber-950/70 border border-amber-500/40 rounded-lg py-1.5 px-1 text-amber-300 font-bold">
+                      🟡 Good (r2)
+                      <div className="text-white font-mono text-[11px] mt-0.5">
+                        {liveCircles.r2Km} km
+                      </div>
+                    </div>
+                    <div className="bg-orange-950/70 border border-orange-500/40 rounded-lg py-1.5 px-1 text-orange-300 font-bold">
+                      🟠 Acc (r3)
+                      <div className="text-white font-mono text-[11px] mt-0.5">
+                        {liveCircles.r3Km} km
+                      </div>
+                    </div>
+                  </div>
+                )
+              )}
 
-                  {/* Category Pill + Circle Ring Pill + Distance */}
-                  <div className="flex flex-wrap items-center gap-1.5 mt-2 pl-8">
-                    <span className="px-2 py-0.5 rounded bg-slate-950 border border-slate-800 text-[9px] font-bold uppercase tracking-wider text-sky-300 truncate max-w-[140px]">
-                      {categoryText}
-                    </span>
+              {/* Confirm Pins & Run / Re-Run Step 3 Button with Quota-Protection Lock */}
+              {(() => {
+                const hasStep3Finished =
+                  aiResult?.steps?.length >= 3 && aiResult?.status === "complete";
+                const isButtonLocked = hasStep3Finished && isStep3Locked;
 
-                    <span
-                      className={`px-1.5 py-0.5 rounded border text-[9px] font-extrabold ${zoneBadge}`}
+                return (
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      onClick={handleTriggerStep3}
+                      disabled={isRunningStep3 || isButtonLocked}
+                      className={`flex-1 py-2 px-3 rounded-xl font-extrabold text-xs shadow-md transition-all flex items-center justify-center gap-1.5 ${
+                        isButtonLocked
+                          ? "bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed"
+                          : aiResult?.status === "awaiting_step3_confirmation" ||
+                            pinsModifiedSinceStep3
+                          ? "bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 animate-pulse cursor-pointer"
+                          : "bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white cursor-pointer"
+                      } disabled:opacity-60`}
                     >
-                      {zoneLabel}
-                    </span>
+                      {isRunningStep3
+                        ? "⏳ Evaluating Step 3..."
+                        : isButtonLocked
+                        ? `🔒 Step 3 Rated (${unhiddenAiPinsList.length} Pins)`
+                        : aiResult?.status === "awaiting_step3_confirmation"
+                        ? `⚡ Confirm Pins (${unhiddenAiPinsList.length}) & Run Step 3`
+                        : `↻ Re-Run Step 3 (${unhiddenAiPinsList.length})`}
+                    </button>
 
-                    {pin.distanceFromAnchorKm !== undefined && (
-                      <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-800 text-slate-300 font-mono text-[9px] font-bold">
-                        {pin.distanceFromAnchorKm} km
-                      </span>
+                    {hasStep3Finished && (
+                      <button
+                        type="button"
+                        onClick={() => setIsStep3Locked((prev) => !prev)}
+                        title={
+                          isStep3Locked
+                            ? "Unlock to allow re-running Step 3"
+                            : "Lock to prevent accidental API calls"
+                        }
+                        className={`py-2 px-2.5 rounded-xl font-extrabold text-[11px] border transition-all cursor-pointer shrink-0 flex items-center gap-1 ${
+                          isStep3Locked
+                            ? "bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border-amber-500/40"
+                            : "bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700"
+                        }`}
+                      >
+                        {isStep3Locked ? "🔓 Unlock" : "🔒 Lock"}
+                      </button>
                     )}
                   </div>
+                );
+              })()}
+            </div>
 
-                  {/* Address */}
-                  <div className="text-[10px] text-slate-400 mt-1.5 pl-8 line-clamp-2 leading-snug">
-                    {pin.realWorldAddress || pin.address}
+            {/* PRO SCROLLABLE REAL-WORLD PIN LIST */}
+            <div
+              ref={sidebarListRef}
+              className="p-2.5 overflow-y-auto space-y-2 flex-1 custom-scrollbar"
+            >
+              {aiPins.map((pin, idx) => {
+                const pinRank = pin.rank ?? idx + 1;
+                const isHidden = hiddenAiPins.includes(idx);
+                const isSelected = activeAiPin === idx;
+                const dist = Number(pin.distanceFromAnchorKm);
+                const r1 = liveCircles?.r1Km ?? 0.5;
+                const r2 = liveCircles?.r2Km ?? 2.0;
+                const r3 = liveCircles?.r3Km ?? 5.0;
+
+                let zoneBadge = "";
+                let zoneCard = "";
+                let rankCircle = "";
+                let zoneLabel = "";
+
+                if (isExplicitLocationMode) {
+                  // EXPLICIT LOCATION MODE: Color strictly by Inside vs. Outside Requested Location!
+                  const insideLoc = isPinInsideLocality(pin);
+                  if (insideLoc) {
+                    zoneBadge = "bg-emerald-500/20 text-emerald-300 border-emerald-500/40";
+                    zoneCard = "bg-slate-900/90 border-emerald-500/40 hover:border-emerald-400";
+                    rankCircle = "bg-emerald-500 text-slate-950";
+                    zoneLabel = `🟢 Inside ${boundaryName.split(",")[0] || "Location"} (Exc)`;
+                  } else {
+                    zoneBadge = "bg-amber-500/20 text-amber-300 border-amber-500/40";
+                    zoneCard = "bg-slate-900/90 border-slate-700 hover:border-amber-400/60";
+                    rankCircle = "bg-slate-700 text-slate-200";
+                    zoneLabel = "⚪ Outside Boundary";
+                  }
+                } else {
+                  // RADIAL CIRCLE MODE: Color by r1 / r2 / r3 circles
+                  zoneBadge = "bg-fuchsia-500/20 text-fuchsia-300 border-fuchsia-500/40";
+                  zoneCard = "bg-slate-900/90 border-fuchsia-500/35 hover:border-fuchsia-400";
+                  rankCircle = "bg-fuchsia-600 text-white";
+                  zoneLabel = "🩷 Bad (>r3)";
+
+                  if (Number.isFinite(dist)) {
+                    if (dist <= r1) {
+                      zoneBadge = "bg-emerald-500/20 text-emerald-300 border-emerald-500/40";
+                      zoneCard = "bg-slate-900/90 border-emerald-500/40 hover:border-emerald-400";
+                      rankCircle = "bg-emerald-500 text-slate-950";
+                      zoneLabel = "🟢 Exc (r1)";
+                    } else if (dist <= r2) {
+                      zoneBadge = "bg-amber-500/20 text-amber-300 border-amber-500/40";
+                      zoneCard = "bg-slate-900/90 border-amber-500/40 hover:border-amber-400";
+                      rankCircle = "bg-amber-500 text-slate-950";
+                      zoneLabel = "🟠 Good (r2)";
+                    } else if (dist <= r3) {
+                      zoneBadge = "bg-rose-500/20 text-rose-300 border-rose-500/40";
+                      zoneCard = "bg-slate-900/90 border-rose-500/40 hover:border-rose-400";
+                      rankCircle = "bg-rose-600 text-white";
+                      zoneLabel = "🔴 Acc (r3)";
+                    }
+                  }
+                }
+
+                const categoryText =
+                  pin.realWorldCategory || pin.category || pin.type || "Real-World POI";
+
+                return (
+                  <div
+                    key={idx}
+                    data-index={idx}
+                    ref={(el) => (sidebarItemRefs.current[idx] = el)}
+                    onClick={() => {
+                      if (!isHidden) {
+                        handleSidebarClick(idx);
+                      }
+                    }}
+                    className={`p-2.5 rounded-xl border transition-all cursor-pointer ${
+                      isHidden
+                        ? "bg-slate-950/40 border-slate-800/60 opacity-45"
+                        : isSelected
+                        ? `${zoneCard} ring-2 ring-sky-400 shadow-lg`
+                        : zoneCard
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span
+                          className={`w-6 h-6 rounded-full text-[10px] font-extrabold flex items-center justify-center shrink-0 shadow ${
+                            isHidden ? "bg-slate-700 text-slate-400" : rankCircle
+                          }`}
+                        >
+                          {pinRank}
+                        </span>
+                        <span
+                          className={`font-extrabold text-xs truncate ${
+                            isHidden ? "line-through text-slate-500" : "text-white"
+                          }`}
+                        >
+                          {pin.realWorldName || pin.name}
+                        </span>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggleHidePinByIndex(idx);
+                        }}
+                        className={`px-2 py-0.5 rounded-md text-[10px] font-extrabold border shrink-0 transition-colors cursor-pointer ${
+                          isHidden
+                            ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/40 hover:bg-emerald-500/30"
+                            : "bg-slate-800 text-slate-300 border-slate-700 hover:bg-rose-600 hover:text-white hover:border-rose-500"
+                        }`}
+                      >
+                        {isHidden ? "Unhide" : "Hide"}
+                      </button>
+                    </div>
+
+                    {/* Category Pill + Status Pill + Distance */}
+                    <div className="flex flex-wrap items-center gap-1.5 mt-2 pl-8">
+                      <span className="px-2 py-0.5 rounded bg-slate-950 border border-slate-800 text-[9px] font-bold uppercase tracking-wider text-sky-300 truncate max-w-[130px]">
+                        {categoryText}
+                      </span>
+
+                      <span
+                        className={`px-1.5 py-0.5 rounded border text-[9px] font-extrabold ${zoneBadge}`}
+                      >
+                        {zoneLabel}
+                      </span>
+
+                      {pin.distanceFromAnchorKm !== undefined && (
+                        <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-800 text-slate-300 font-mono text-[9px] font-bold">
+                          {pin.distanceFromAnchorKm} km
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Address */}
+                    <div className="text-[10px] text-slate-400 mt-1.5 pl-8 line-clamp-2 leading-snug">
+                      {pin.realWorldAddress || pin.address}
+                    </div>
                   </div>
-                </div>
-              );
-            })}
+                );
+              })}
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* MAP CONTAINER */}
       <MapContainer

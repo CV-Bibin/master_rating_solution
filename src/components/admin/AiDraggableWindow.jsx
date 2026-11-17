@@ -206,17 +206,19 @@ export default function AiDraggableWindow({ result, onClose }) {
             </div>
           )}
 
-          {/* Map through completed steps dynamically */}
+         {/* Map through completed steps dynamically */}
           {result?.steps?.map((step, idx) => {
             let parsedJSON = {};
             try {
-              const sanitized = String(step.result || "")
-                .replace(/```json/gi, "")
-                .replace(/```/g, "")
-                .replace(/"\s+[A-Za-z0-9_]+\s*(\}|\]|,)/g, '"$1')
-                .replace(/,\s*([}\]])/g, "$1")
-                .trim();
-              parsedJSON = JSON.parse(sanitized);
+              let text = String(step.result || "").trim();
+              const start = text.indexOf("{");
+              const end = text.lastIndexOf("}");
+              if (start !== -1 && end !== -1 && end > start) {
+                text = text.substring(start, end + 1);
+              }
+              text = text.replace(/,\s*([}\]])/g, "$1");
+              
+              parsedJSON = JSON.parse(text);
               if (parsedJSON.queryAnalysis) parsedJSON = parsedJSON.queryAnalysis;
               if (parsedJSON.realWorldDiscovery) parsedJSON = parsedJSON.realWorldDiscovery;
               if (parsedJSON.visualRouting) parsedJSON = parsedJSON.visualRouting;

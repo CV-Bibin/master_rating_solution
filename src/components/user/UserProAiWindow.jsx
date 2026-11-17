@@ -9,14 +9,21 @@ function safeParseJson(rawStr) {
   if (!rawStr) return null;
   if (typeof rawStr === "object") return rawStr;
   try {
-    const sanitized = String(rawStr)
-      .replace(/```json/gi, "")
-      .replace(/```/g, "")
-      .replace(/"\s+[A-Za-z0-9_]+\s*(\}|\]|,)/g, '"$1')
-      .replace(/,\s*([}\]])/g, "$1")
-      .trim();
-    return JSON.parse(sanitized);
+    let text = String(rawStr).trim();
+    
+    // Forcefully extract ONLY what is inside the outermost { }
+    const start = text.indexOf("{");
+    const end = text.lastIndexOf("}");
+    if (start !== -1 && end !== -1 && end > start) {
+      text = text.substring(start, end + 1);
+    }
+    
+    // Remove invalid trailing commas before closing braces/brackets
+    text = text.replace(/,\s*([}\]])/g, "$1");
+    
+    return JSON.parse(text);
   } catch (e) {
+    console.error("Pro Window JSON Parse Error:", e);
     return null;
   }
 }
@@ -286,18 +293,39 @@ function ProStep1Card({ data, taskQuery }) {
 // - Duplicate 4-circle legend bar removed (already shown in left map panel)
 // - 20 discovered locations list is COLLAPSED (false) by default!
 // ==========================================
-function ProStep2Card({ data }) {
-  // Initialized to FALSE so the 20 results stay hidden/collapsed until clicked!
+function ProStep2Card({ data, step1Data }) {
   const [expanded, setExpanded] = useState(false);
 
   const root = data?.realWorldDiscovery || data || {};
   const matches = Array.isArray(root.topMatches) ? root.topMatches : [];
 
+  const step1Root = step1Data?.queryAnalysis || step1Data?.visualRouting || step1Data || {};
+  const vStatus = String(
+    step1Root.viewportStatus || step1Root.locationIntent || ""
+  ).toUpperCase();
+  const boundaryName =
+    step1Root.boundaryHighlight &&
+    String(step1Root.boundaryHighlight).toLowerCase() !== "null"
+      ? String(step1Root.boundaryHighlight)
+      : "";
+  const isExplicitLocationMode = vStatus.includes("EXPLICIT") || Boolean(boundaryName);
+  const cleanLocalityToken = boundaryName.split(",")[0].trim().toLowerCase();
+
+  const isMatchInsideLocality = (m) => {
+    const addr = String(m.realWorldAddress || m.address || "").toLowerCase();
+    if (cleanLocalityToken && cleanLocalityToken.length >= 2 && addr.includes(cleanLocalityToken)) {
+      return true;
+    }
+    return (
+      m.isStrictlyInsideLocation !== false &&
+      String(m.isStrictlyInsideLocation).toLowerCase() !== "false"
+    );
+  };
+
   const relevantMatches = matches.filter(
     (m) => m.isRelevant !== false && String(m.isRelevant).toLowerCase() !== "false"
   );
 
-  // Use live circles from mapStep3Bridge if available, or fallback to sorted distances
   const liveCircles = mapStep3Bridge?.liveCircles;
   const sortedDists = relevantMatches
     .map((m) => Number(m.distanceFromAnchorKm))
@@ -309,11 +337,7 @@ function ProStep2Card({ data }) {
   const r2 = liveCircles?.r2Km ?? +(sortedDists[Math.min(4, sortedDists.length - 1)] ?? Math.max(r1 * 2, 1.5)).toFixed(2);
   const r3 = liveCircles?.r3Km ?? +(sortedDists[Math.min(9, sortedDists.length - 1)] ?? Math.max(r2 * 1.8, 3.0)).toFixed(2);
 
-  const insideCount = matches.filter(
-    (m) =>
-      m.isStrictlyInsideLocation !== false &&
-      String(m.isStrictlyInsideLocation).toLowerCase() !== "false"
-  ).length;
+  const insideCount = matches.filter(isMatchInsideLocality).length;
 
   return (
     <div className="bg-slate-900/95 border border-slate-800 rounded-xl overflow-hidden shadow-lg animate-in fade-in slide-in-from-bottom-2 duration-300">
@@ -332,7 +356,6 @@ function ProStep2Card({ data }) {
       </div>
 
       <div className="p-3.5 space-y-3">
-        {/* Top Summary Metrics */}
         <div className="grid grid-cols-3 gap-2 text-center">
           <div className="bg-slate-950 border border-slate-800 rounded-lg p-2">
             <div className="text-sm font-extrabold text-purple-400">{matches.length}</div>
@@ -350,7 +373,6 @@ function ProStep2Card({ data }) {
           </div>
         </div>
 
-        {/* Collapsible Drawer (Hidden by Default) */}
         {matches.length > 0 && (
           <div>
             <button
@@ -369,7 +391,26 @@ function ProStep2Card({ data }) {
             {expanded && (
               <div className="mt-2 max-h-60 overflow-y-auto space-y-2 pr-1 custom-scrollbar">
                 {matches.map((m, idx) => {
-                  const zone = getPinZoneTheme(m.distanceFromAnchorKm, r1, r2, r3);
+                  let zone;
+                  if (isExplicitLocationMode) {
+                    const inside = isMatchInsideLocality(m);
+                    zone = inside
+                      ? {
+                          label: `🟢 Inside ${boundaryName.split(",")[0] || "Location"} (Exc)`,
+                          card: "bg-emerald-950/35 border-emerald-500/40",
+                          badge: "bg-emerald-500/20 text-emerald-300 border-emerald-500/40",
+                          rankBg: "bg-emerald-600 text-white",
+                        }
+                      : {
+                          label: "⚪ Outside Boundary",
+                          card: "bg-slate-950/90 border-slate-700",
+                          badge: "bg-amber-500/20 text-amber-300 border-amber-500/40",
+                          rankBg: "bg-slate-700 text-slate-200",
+                        };
+                  } else {
+                    zone = getPinZoneTheme(m.distanceFromAnchorKm, r1, r2, r3);
+                  }
+
                   const categoryLabel =
                     m.realWorldCategory || m.category || m.type || "General POI";
 
@@ -809,8 +850,11 @@ export default function UserProAiWindow({ result, onClose }) {
           )}
 
           {/* RENDER COMPLETED STEPS FIRST (SO THEY NEVER VANISH IF A LATER STEP FAILS!) */}
-          {result?.steps?.map((step, idx) => {
+         {result?.steps?.map((step, idx) => {
             const parsed = safeParseJson(step.result);
+            const step1Parsed = result?.steps?.[0]
+              ? safeParseJson(result.steps[0].result)
+              : null;
             if (idx === 0 && parsed) {
               return (
                 <ProStep1Card
@@ -821,7 +865,13 @@ export default function UserProAiWindow({ result, onClose }) {
               );
             }
             if (idx === 1 && parsed) {
-              return <ProStep2Card key="pro-step-2" data={parsed} />;
+              return (
+                <ProStep2Card
+                  key="pro-step-2"
+                  data={parsed}
+                  step1Data={step1Parsed}
+                />
+              );
             }
             if (idx >= 2 && parsed) {
               return <ProStep3Card key={`pro-step-${idx + 1}`} data={parsed} />;

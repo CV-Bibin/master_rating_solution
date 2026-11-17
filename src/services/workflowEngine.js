@@ -14,7 +14,13 @@ function cleanJsonResponse(rawText) {
   }
 
   try {
-    let cleanedText = rawText.replace(/```json/gi, "").replace(/```/gi, "").trim();
+    let cleanedText = rawText
+      .replace(/```json/gi, "")
+      .replace(/```/gi, "")
+      .replace(/"\s+[A-Za-z0-9_]+\s*(\}|\]|,)/g, '"$1')
+      .replace(/,\s*([}\]])/g, "$1")
+      .trim();
+
     const startIndex = cleanedText.indexOf("{");
     const endIndex = cleanedText.lastIndexOf("}");
 
@@ -79,7 +85,7 @@ function buildSelectedTaskData(parsedTask, requiredInputKeys = []) {
 
 function formatGuidelineLabel(guide) {
   const title = guide.title || guide.topic || guide.name || "Guideline";
-  return guide.section ? `Section ${guide.section} - ${title}` : title;
+  return guide.section ? `Section ${guide.section}: ${title}` : title;
 }
 
 function buildGuidelinesText(guidelines) {
@@ -122,16 +128,23 @@ const extractDeepValue = (obj, targetKey) => {
   if (foundKey) return obj[foundKey];
   for (const key of Object.keys(obj)) {
     const result = extractDeepValue(obj[key], targetKey);
-    if (result) return result;
+    if (result !== null && result !== undefined) return result;
   }
   return null;
 };
 
 const safeExtractLatLng = (val) => {
   if (!val) return null;
-  if (Array.isArray(val) && val.length >= 2) return [parseFloat(val[0]), parseFloat(val[1])];
-  if (typeof val === "object" && val.lat !== undefined && val.lng !== undefined)
-    return [parseFloat(val.lat), parseFloat(val.lng)];
+  if (Array.isArray(val) && val.length >= 2) {
+    const lat = parseFloat(val[0]);
+    const lng = parseFloat(val[1]);
+    if (Number.isFinite(lat) && Number.isFinite(lng)) return [lat, lng];
+  }
+  if (typeof val === "object" && val.lat !== undefined && val.lng !== undefined) {
+    const lat = parseFloat(val.lat);
+    const lng = parseFloat(val.lng);
+    if (Number.isFinite(lat) && Number.isFinite(lng)) return [lat, lng];
+  }
   if (typeof val === "string") {
     const m = val.match(/(-?\d+\.\d+)[^\d-]+(-?\d+\.\d+)/);
     if (m) return [parseFloat(m[1]), parseFloat(m[2])];
@@ -154,6 +167,77 @@ export function calculateDistance(lat1, lon1, lat2, lon2) {
       Math.sin(dLon / 2);
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c;
+}
+
+// ==========================================
+// EXACT GEOCODER FOR EXPLICIT LOCALITIES (FAMOUS OR NON-FAMOUS)
+// Never relies on raw candidate results — fetches true coordinates of the named town/locality!
+// ==========================================
+const localityGeocodeCache = new Map();
+
+async function resolveExplicitLocalityCoords(localityName, countryHint = "") {
+  if (!localityName || typeof localityName !== "string") return null;
+  const cleanName = localityName.trim();
+  if (!cleanName || cleanName.toLowerCase() === "null" || cleanName.toLowerCase() === "none") {
+    return null;
+  }
+
+  const queryStr =
+    countryHint && !cleanName.toLowerCase().includes(countryHint.toLowerCase())
+      ? `${cleanName}, ${countryHint}`
+      : cleanName;
+
+  const cacheKey = queryStr.toLowerCase();
+  if (localityGeocodeCache.has(cacheKey)) {
+    return localityGeocodeCache.get(cacheKey);
+  }
+
+  try {
+    const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(
+      queryStr
+    )}`;
+    const response = await fetch(url, {
+      headers: { Accept: "application/json" },
+    });
+    if (!response.ok) return null;
+    const data = await response.json();
+    if (Array.isArray(data) && data.length > 0 && data[0].lat && data[0].lon) {
+      const coords = [+parseFloat(data[0].lat).toFixed(6), +parseFloat(data[0].lon).toFixed(6)];
+      localityGeocodeCache.set(cacheKey, coords);
+      return coords;
+    }
+  } catch (err) {
+    console.warn("Locality geocoding fallback warning:", err);
+  }
+  return null;
+}
+
+// Inject updated anchorCoordinates back into Step 1 JSON so MapPreview & DistanceDemotionZones draw the circle in the right place!
+function updateStep1AnchorCoordsInJson(step1RawJsonStr, newCoords) {
+  if (!newCoords || !Array.isArray(newCoords) || newCoords.length < 2) return step1RawJsonStr;
+  try {
+    const obj = JSON.parse(step1RawJsonStr);
+    const coordStr = `${newCoords[0]}, ${newCoords[1]}`;
+
+    if (obj.anchorCoordinates !== undefined) obj.anchorCoordinates = coordStr;
+    if (obj.AnchorCoordinates !== undefined) obj.AnchorCoordinates = coordStr;
+    if (obj.queryAnalysis && typeof obj.queryAnalysis === "object") {
+      obj.queryAnalysis.anchorCoordinates = coordStr;
+    }
+    if (obj.visualRouting && typeof obj.visualRouting === "object") {
+      obj.visualRouting.anchorCoordinates = coordStr;
+    }
+    if (
+      obj.anchorCoordinates === undefined &&
+      obj.AnchorCoordinates === undefined &&
+      !obj.queryAnalysis
+    ) {
+      obj.anchorCoordinates = coordStr;
+    }
+    return JSON.stringify(obj, null, 2);
+  } catch (e) {
+    return step1RawJsonStr;
+  }
 }
 
 // ==========================================
@@ -231,7 +315,8 @@ export function computeExactMapCircles({
   // SCENARIO 4: FRESH VIEWPORT, USER OUTSIDE
   if (isFreshOutside && vpCenter) {
     if (hasInsideViewportResults) {
-      const r2 = outsideViewportDistancesMeters.length > 0 ? outsideViewportDistancesMeters[0] * 1.1 : 2000;
+      const r2 =
+        outsideViewportDistancesMeters.length > 0 ? outsideViewportDistancesMeters[0] * 1.1 : 2000;
       const nextR3 = outsideViewportDistancesMeters.find((d) => d > r2);
       const r3 = nextR3 ? nextR3 * 1.1 : r2 * 1.5;
       return {
@@ -244,7 +329,8 @@ export function computeExactMapCircles({
         sortedDistancesKm: distancesMeters.map((m) => +(m / 1000).toFixed(2)),
       };
     } else {
-      const r1 = outsideViewportDistancesMeters.length > 0 ? outsideViewportDistancesMeters[0] * 1.1 : 2000;
+      const r1 =
+        outsideViewportDistancesMeters.length > 0 ? outsideViewportDistancesMeters[0] * 1.1 : 2000;
       const nextR2 = outsideViewportDistancesMeters.find((d) => d > r1);
       const r2 = nextR2 ? nextR2 * 1.1 : r1 * 1.5;
       const nextR3 = outsideViewportDistancesMeters.find((d) => d > r2);
@@ -344,6 +430,7 @@ function computeViewportStatus(parsedTask) {
 // ==========================================
 export async function runAiWorkflow(projectId, parsedTask, onStepComplete, options = {}) {
   const pauseBeforeFinalStep = options.pauseBeforeFinalStep !== false;
+  const stepOutputs = [];
 
   try {
     if (!projectId) throw new Error("Project ID is required.");
@@ -380,7 +467,6 @@ export async function runAiWorkflow(projectId, parsedTask, onStepComplete, optio
 
     const hasPendingStep3 = pauseBeforeFinalStep && allActiveSteps.length >= 3;
 
-    const stepOutputs = [];
     let liveMapsContext =
       "Google Maps API pending extraction of Intent and Coordinates from Step 1...";
     let anchorCoords = null;
@@ -400,13 +486,18 @@ You are an AI map quality rating assistant.
 SYSTEM RULES:
 - Perform ONLY the current workflow step.
 - USER PHYSICAL POSITION OVERRIDE: The user is definitively ${userPhysicalStatus}. Base your logic on this exact physical status using strict rectangle bounding box math.
-- UNIQUE LOCATION OVERRIDE: If the query is a unique entity, city, state, country, or postal code (e.g., "Surat", "India", "90210"), the Anchor Point MUST be the coordinates of that specific queried location. DO NOT use the User Location or Viewport. The Location Intent must be classified as "Explicit Location".
+- EXPLICIT LOCATION & CATEGORY + LOCATION OVERRIDE (CRITICAL):
+  * If the query contains ANY explicit city, town, village, district, or locality name (e.g., "Surat", "Kottayam, Kerala", "Vengara", "മലപ്പുറം വേങ്ങര ഗേൾസ് സ്കൂൾ"), you MUST set \`locationIntent: "Explicit Location"\`, \`viewportStatus: "EXPLICIT_LOCATION"\`, and set \`boundaryHighlight\` to the clean English name of that specific town/locality (e.g., \`"Vengara, Malappuram"\` or \`"Kottayam, Kerala"\`).
+  * NEVER copy \`viewport_center_lat_lng\` or \`user_lat_lng\` into \`anchorCoordinates\` when an Explicit Location is present! Instead, estimate the true geographic coordinates of that named locality (e.g., Vengara = \`11.0507, 75.9754\`, Kottayam = \`9.5916, 76.5222\`).
+  * Under Section 10.7.6 & 10.7.7, if a query combines a location modifier with a generic category or school/hospital/hotel type (e.g., "Malappuram Vengara Girls School" / "മലപ്പുറം വേങ്ങര ഗേൾസ് സ്കൂൾ" where it does NOT specify "Government", or "Kilkenny hotel", "food in kottayam"), classify \`queryType\` as \`"Type C: Category Query"\` and set \`isNavigational: false\`.
 - NO MAPS INTENT OVERRIDE: If the query seeks information (e.g., "weather in NY", "is cucumber a fruit"), refers to purely online entities (e.g., "Facebook", "Groupon"), or lacks physical location intent, it has NO MAPS INTENT. All map results for these queries MUST be rated as Bad.
 - SPECIFIC ADDRESS OVERRIDE: If the query contains a full address with an explicit locality (e.g., "154 Orchard St, New York"), the user's viewport and location are completely irrelevant. The Anchor Point is that exact address. An exact match is rated Navigational.
 - NON-SPECIFIC ADDRESS OVERRIDE: If the query is a partial address (e.g., "154 Orchard St" without a city), infer the anchor from the User Location or Fresh Viewport. The closest exact match is eligible for Navigational. Demote distant results to Good or Bad based strictly on distance from the inferred anchor.
 - ROUTING QUERY OVERRIDE: If the query mentions two distinct locations indicating driving directions (e.g., "San Francisco to LA"), returning EITHER of the two locations is considered the best experience. Rate either location as Excellent for Relevance.
 - COORDINATES & MY LOCATION OVERRIDE: If the query is raw GPS coordinates or literal phrases like "my location" or "where am I", the Anchor Point is strictly those coordinates or the user's location. A result within a 50m radius is rated Excellent; outside 50m is rated Bad. A pin within 50m is Perfect; outside is Wrong. There are NO Navigational results for this query type.
-- LINGUISTIC RULE (TRANSLATION VS TRANSLITERATION): If the user query is non-English, you MUST intelligently format the "sanitizedQuery". TRANSLATE generic categories to English (e.g., "zapatos" -> "shoes", "रेस्टोरेंट" -> "restaurant"). TRANSLITERATE brand names and local places into English characters without literal translation (e.g., "ಸ್ಟಾರ್ಬಕ್ಸ್" -> "Starbucks", "मैकडॉनल्ड्स" -> "McDonalds").
+- LINGUISTIC & GOOGLE MAPS SEARCH QUERY RULE (CRITICAL FOR MALAYALAM & NON-ENGLISH QUERIES):
+  * When generating \`sanitizedQuery\` for a non-English query (e.g., Malayalam, Hindi, Tamil), DO NOT invent awkward or overly literal English phrases like "Imported Food Store"!
+  * Keep \`sanitizedQuery\` natural, simple, and Google-Maps-friendly (e.g., "Girls School Vengara Malappuram", "Food Restaurant Kottayam", "Supermarket"). If a local brand or place name is in Malayalam script, transliterate the proper noun naturally into English and keep standard category words simple.
 - CATEGORY RETENTION RULE: If you output matched locations (e.g., topMatches or AI Pins), you MUST include a "category" field for each match by extracting the category provided in the LIVE GOOGLE MAPS API RESULTS below. Do not drop the category field.
 - Use ONLY the selected structured task inputs below.
 
@@ -432,7 +523,123 @@ Return only the result requested by this workflow step.
 `;
 
       const rawResult = await executeWithAutoHealing(prompt);
-      const safeResult = cleanJsonResponse(rawResult);
+      let safeResult = cleanJsonResponse(rawResult);
+
+      // =========================================================================
+      // AFTER STEP 1: GEOCODE EXPLICIT LOCALITY & FETCH LIVE GOOGLE MAPS PLACES
+      // =========================================================================
+      if (stepOutputs.length === 0) {
+        try {
+          const parsedResult = JSON.parse(safeResult);
+
+          const cityName =
+            extractDeepValue(parsedResult, "boundaryHighlight") ||
+            extractDeepValue(parsedResult, "explicitLocationModifier") ||
+            extractDeepValue(parsedResult, "expectedUserResultOrigin");
+
+          const vStatus = String(
+            extractDeepValue(parsedResult, "viewportStatus") ||
+              extractDeepValue(parsedResult, "locationIntent") ||
+              ""
+          ).toUpperCase();
+
+          const isExplicitLoc =
+            vStatus.includes("EXPLICIT") ||
+            Boolean(
+              cityName &&
+                typeof cityName === "string" &&
+                cityName.trim().toLowerCase() !== "null" &&
+                cityName.trim().toLowerCase() !== "none"
+            );
+
+          // 1. If Explicit Location (famous OR non-famous like "Vengara"), geocode the town name directly
+          // so the anchor point & map circle are placed at the exact town, NEVER at the Viewport or User!
+          if (isExplicitLoc && cityName) {
+            const geocodedTownCoords = await resolveExplicitLocalityCoords(
+              cityName,
+              parsedTask.country || "India"
+            );
+            if (geocodedTownCoords) {
+              anchorCoords = geocodedTownCoords;
+              // Update Step 1 JSON so MapPreview & DistanceDemotionZones center the circle at the exact town!
+              safeResult = updateStep1AnchorCoordsInJson(safeResult, geocodedTownCoords);
+              parsedResult.anchorCoordinates = `${geocodedTownCoords[0]}, ${geocodedTownCoords[1]}`;
+            }
+          }
+
+          if (!anchorCoords) {
+            anchorCoords = safeExtractLatLng(
+              extractDeepValue(parsedResult, "anchorCoordinates") ||
+                parsedTask.viewportCenter ||
+                parsedTask.userLatLng
+            );
+          }
+
+          const ac = anchorCoords ? `${anchorCoords[0]}, ${anchorCoords[1]}` : "";
+          const sq = extractDeepValue(parsedResult, "sanitizedQuery") || parsedTask.query;
+
+          // 2. Build the Google Maps search string:
+          // CRITICAL FIX: When `isExplicitLoc` is true, DO NOT strip `cityName` from the search query!
+          // Keeping "food in Kottayam, Kerala" or "Girls School Vengara" ensures Google Maps searches inside that exact town!
+          let apiSearchString = String(sq || parsedTask.query || "").trim();
+          if (
+            isExplicitLoc &&
+            cityName &&
+            !apiSearchString.toLowerCase().includes(String(cityName).toLowerCase().split(",")[0].trim())
+          ) {
+            apiSearchString = `${apiSearchString} in ${cityName}`;
+          }
+
+          if (anchorCoords) {
+            let liveMapsData = await searchNearbyPlaces(apiSearchString, ac, parsedResult);
+
+            // 3. FALLBACK FOR MALAYALAM / NON-ENGLISH QUERIES:
+            // If the LLM's English sanitizedQuery (e.g. "Imported Food Store") returned 0 results
+            // AND the original raw query was different, retry immediately with the raw `parsedTask.query`!
+            if (
+              (!Array.isArray(liveMapsData) || liveMapsData.length === 0) &&
+              parsedTask.query &&
+              parsedTask.query.trim().toLowerCase() !== apiSearchString.toLowerCase()
+            ) {
+              console.log(
+                `🔄 Fallback Maps API Search with original query: "${parsedTask.query}"`
+              );
+              liveMapsData = await searchNearbyPlaces(parsedTask.query, ac, parsedResult);
+            }
+
+            // 4. If Explicit Location still had no Nominatim match earlier, snap anchor to the discovered pins inside the town
+            if (isExplicitLoc && Array.isArray(liveMapsData) && liveMapsData.length > 0) {
+              const firstPt = safeExtractLatLng(
+                liveMapsData[0].realWorldLatLng ||
+                  liveMapsData[0].lat_lng ||
+                  liveMapsData[0].coordinates ||
+                  liveMapsData[0].location
+              );
+              if (firstPt && anchorCoords) {
+                const distFromOldAnchor = calculateDistance(
+                  anchorCoords[0],
+                  anchorCoords[1],
+                  firstPt[0],
+                  firstPt[1]
+                );
+                // If Step 1's anchor was > 10 km away from the actual results in that town, snap to the town's results!
+                if (distFromOldAnchor > 10) {
+                  anchorCoords = firstPt;
+                  safeResult = updateStep1AnchorCoordsInJson(safeResult, firstPt);
+                }
+              }
+            }
+
+            liveMapsContext =
+              Array.isArray(liveMapsData) && liveMapsData.length > 0
+                ? JSON.stringify(liveMapsData, null, 2)
+                : "No locations found in Google Maps within the 50km radius.";
+          }
+        } catch (err) {
+          console.warn("API Trigger Warning: Could not parse Step 1 JSON.", err);
+          liveMapsContext = "Failed to fetch Google Maps data.";
+        }
+      }
 
       stepOutputs.push({
         stepId: step.id,
@@ -448,52 +655,6 @@ Return only the result requested by this workflow step.
           steps: [...stepOutputs],
           status: "running",
         });
-      }
-
-      // TRIGGER GOOGLE PLACES API AFTER STEP 1
-      if (stepOutputs.length === 1) {
-        try {
-          const parsedResult = JSON.parse(safeResult);
-          anchorCoords = safeExtractLatLng(
-            extractDeepValue(parsedResult, "anchorCoordinates") ||
-              parsedTask.viewportCenter ||
-              parsedTask.userLatLng
-          );
-          const ac = String(anchorCoords);
-
-          const sq = extractDeepValue(parsedResult, "sanitizedQuery") || parsedTask.query;
-          const qType = (
-            extractDeepValue(parsedResult, "queryType") ||
-            extractDeepValue(parsedResult, "QueryType") ||
-            ""
-          ).toLowerCase();
-          const isChainOrCategory =
-            qType.includes("chain") || qType.includes("category") || qType.includes("business");
-
-          const cityName =
-            extractDeepValue(parsedResult, "boundaryHighlight") ||
-            extractDeepValue(parsedResult, "expectedUserResultOrigin") ||
-            extractDeepValue(parsedResult, "explicitLocationModifier");
-
-          let apiSearchString = sq;
-
-          if (isChainOrCategory && cityName && typeof cityName === "string") {
-            const cityRegex = new RegExp(cityName, "gi");
-            apiSearchString = apiSearchString.replace(cityRegex, "").trim();
-            parsedResult.isLocationStripped = true;
-          }
-
-          if (anchorCoords) {
-            const liveMapsData = await searchNearbyPlaces(apiSearchString, ac, parsedResult);
-            liveMapsContext =
-              liveMapsData.length > 0
-                ? JSON.stringify(liveMapsData, null, 2)
-                : "No locations found in Google Maps within the 50km radius.";
-          }
-        } catch (err) {
-          console.warn("API Trigger Warning: Could not parse Step 1 JSON.", err);
-          liveMapsContext = "Failed to fetch Google Maps data.";
-        }
       }
 
       await delay(2500);
@@ -521,7 +682,15 @@ Return only the result requested by this workflow step.
     };
   } catch (error) {
     console.error("AI Workflow Engine Error:", error);
-    return { error: error.message, status: "error" };
+    const errorState = {
+      parsedData: parsedTask,
+      steps: stepOutputs, // Preserves Step 1 if Step 2 fails!
+      finalEvaluation: null,
+      status: "error",
+      error: error.message || "Workflow execution failed.",
+    };
+    if (onStepComplete) onStepComplete(errorState);
+    return errorState;
   }
 }
 
@@ -582,15 +751,16 @@ export async function runStep3FinalEvaluation({
       .filter((guide) => guide.status !== "draft")
       .sort((a, b) => (b.priority || 0) - (a.priority || 0));
 
-    const { bounds: taskBounds, userPhysicalStatus } = computeViewportStatus(parsedTask);
+    const { bounds: taskBounds } = computeViewportStatus(parsedTask);
     const effectiveBounds = viewportBounds || taskBounds;
 
     const step1Json = JSON.parse(cleanJsonResponse(previousSteps[0].result));
-    const anchorCoords = safeExtractLatLng(
+    let anchorCoords = safeExtractLatLng(
       extractDeepValue(step1Json, "anchorCoordinates") ||
         parsedTask.viewportCenter ||
         parsedTask.userLatLng
     );
+
     const viewportStatusStr = String(
       extractDeepValue(step1Json, "viewportStatus") || ""
     ).toUpperCase();
@@ -605,11 +775,51 @@ export async function runStep3FinalEvaluation({
       extractDeepValue(step1Json, "explicitLocationModifier") ||
       "";
 
+    const qTypeRaw = String(extractDeepValue(step1Json, "queryType") || "");
+    const qType = qTypeRaw.toLowerCase();
+    const isCategoryQuery =
+      qType.includes("type c") ||
+      qType.includes("category") ||
+      qType.includes("10.7");
+    const isChainQuery =
+      !isCategoryQuery &&
+      (qType.includes("chain") || qType.includes("10.6"));
+    const isStep1Navigational =
+      String(extractDeepValue(step1Json, "isNavigational") || "").toLowerCase() === "true" ||
+      String(extractDeepValue(step1Json, "isNavigational") || "").toLowerCase() === "yes";
+
     const isExplicit =
       locationIntentStr.includes("EXPLICIT") ||
       viewportStatusStr.includes("EXPLICIT") ||
       (locationModTypeStr && locationModTypeStr !== "NULL" && locationModTypeStr !== "NONE") ||
       Boolean(explicitLocalityName && String(explicitLocalityName).toLowerCase() !== "null");
+
+    const insideLocalityPins = unhiddenAiPins.filter(
+      (p) =>
+        p.isStrictlyInsideLocation !== false &&
+        String(p.isStrictlyInsideLocation).toLowerCase() !== "false"
+    );
+    const insideLocalityPinsCount = insideLocalityPins.length;
+
+    // Ensure anchorCoords for Explicit Location is centered on the actual locality (not a distant user/viewport)
+    if (isExplicit && explicitLocalityName) {
+      const geocodedCoords = await resolveExplicitLocalityCoords(
+        explicitLocalityName,
+        parsedTask.country || "India"
+      );
+      if (geocodedCoords) {
+        anchorCoords = geocodedCoords;
+      } else if (insideLocalityPins.length > 0) {
+        const pts = insideLocalityPins
+          .map((p) => safeExtractLatLng(p.realWorldLatLng || p.point || p.coordinates))
+          .filter(Boolean);
+        if (pts.length > 0) {
+          const avgLat = pts.reduce((s, c) => s + c[0], 0) / pts.length;
+          const avgLng = pts.reduce((s, c) => s + c[1], 0) / pts.length;
+          anchorCoords = [+avgLat.toFixed(6), +avgLng.toFixed(6)];
+        }
+      }
+    }
 
     const circleData = computeExactMapCircles({
       unhiddenAiPins,
@@ -620,28 +830,65 @@ export async function runStep3FinalEvaluation({
 
     let selectedTaskData = buildSelectedTaskData(parsedTask, step3.requiredInputKeys || []);
 
-    // Count how many unhidden real-world pins are strictly INSIDE the requested location modifier
-    const insideLocalityPinsCount = unhiddenAiPins.filter(
-      (p) =>
-        p.isStrictlyInsideLocation !== false &&
-        String(p.isStrictlyInsideLocation).toLowerCase() !== "false"
-    ).length;
-
     if (isExplicit) {
-      selectedTaskData.evaluationMode = {
-        mode: "EXPLICIT_LOCATION_MODIFIER (BOUNDARY RULE — NO RADIAL DEMOTION INSIDE LOCALITY)",
-        requestedLocationModifier: explicitLocalityName,
-        locationModifierType: locationModTypeStr || "General",
-        unhiddenRealWorldBranchesInsideRequestedLocation: insideLocalityPinsCount,
-        ruleForResultsInsideRequestedLocation:
-          insideLocalityPinsCount === 1
-            ? "ONLY 1 branch exists inside requested location -> Rate the inside branch NAVIGATIONAL (NO distance demotion!)."
-            : "MULTIPLE branches exist inside requested location -> Rate ALL branches inside the requested location EXCELLENT (NO distance demotion! Ignore km from city center!).",
-        ruleForResultsOutsideRequestedLocation:
-          insideLocalityPinsCount >= 4
-            ? "MANY branches exist inside requested location -> Rate any result OUTSIDE the requested location BAD (Distance/Prominence Issue)."
-            : "FEW/ONE/NONE branches exist inside -> Demote outside results gradually (Good / Acceptable / Bad) based on distance from the requested locality.",
-      };
+      if (isCategoryQuery) {
+        // =========================================================
+        // SECTION 10.7.6 & 10.7.7: CATEGORY QUERY WITH LOCATION MODIFIER
+        // =========================================================
+        selectedTaskData.evaluationMode = {
+          mode: "SECTION_10_7_6_CATEGORY_QUERY_WITH_LOCATION_MODIFIER (IGNORE USER & VIEWPORT LOCATION)",
+          appliedGuidelineSection:
+            "Section 10.7.6 (Category Query with Location Modifier) & Section 10.7.7 (Navigational Results for Category Queries)",
+          requestedLocationModifier: explicitLocalityName,
+          unhiddenRealWorldMatchesInsideRequestedLocation: insideLocalityPinsCount,
+          navigationalRule_10_7_7:
+            "DO NOT assume Navigational just because 1 result is inside! Under Section 10.7.6 & 10.7.7, a category query (e.g. 'girls school', 'hotel', 'airport', 'food') is NOT Navigational unless the query wording explicitly names a unique prominent POI (e.g. 'Government Girls School' vs generic 'Girls School'). Otherwise, rate matching category results inside the requested location as EXCELLENT!",
+          ruleForResultsInsideRequestedLocation:
+            "All results inside the requested location that satisfy the category intent receive EXCELLENT (no distance demotion! Ignore user and viewport locations!).",
+          ruleForResultsOutsideRequestedLocation:
+            insideLocalityPinsCount >= 4
+              ? "MANY category options exist inside requested location -> Rate results outside the requested location BAD (Distance/Prominence Issue)."
+              : `FEW/ONE (${insideLocalityPinsCount}) category options exist inside "${explicitLocalityName}" -> Demote outside results gradually (Good / Acceptable / Bad) based on their distance from "${explicitLocalityName}" and prominence.`,
+        };
+      } else if (isChainQuery) {
+        // =========================================================
+        // SECTION 10.6.3: CHAIN BUSINESS WITH LOCATION MODIFIER
+        // =========================================================
+        selectedTaskData.evaluationMode = {
+          mode: "SECTION_10_6_3_CHAIN_BUSINESS_WITH_LOCATION_MODIFIER (IGNORE USER & VIEWPORT LOCATION)",
+          appliedGuidelineSection: "Section 10.6.3 (Chain Business with Location Modifier)",
+          requestedLocationModifier: explicitLocalityName,
+          locationModifierType: locationModTypeStr || "General",
+          unhiddenRealWorldBranchesInsideRequestedLocation: insideLocalityPinsCount,
+          ruleForResultsInsideRequestedLocation:
+            insideLocalityPinsCount === 1
+              ? "ONLY 1 branch of this chain exists inside requested location -> Rate the unique inside branch NAVIGATIONAL (NO distance demotion!)."
+              : "MULTIPLE branches of this chain exist inside requested location -> Rate ALL branches inside the requested location EXCELLENT (NO distance demotion!).",
+          ruleForResultsOutsideRequestedLocation:
+            insideLocalityPinsCount >= 4
+              ? "MANY branches exist inside requested location -> Rate any result OUTSIDE the requested location BAD (Distance/Prominence Issue)."
+              : "FEW/ONE/NONE branches exist inside -> Demote outside results gradually (Good / Acceptable / Bad) based on distance from the requested locality.",
+        };
+      } else {
+        // =========================================================
+        // SPECIFIC POI / ENTITY WITH LOCATION MODIFIER
+        // =========================================================
+        selectedTaskData.evaluationMode = {
+          mode: "POI_OR_ENTITY_WITH_LOCATION_MODIFIER (BOUNDARY RULE — IGNORE USER & VIEWPORT LOCATION)",
+          appliedGuidelineSection:
+            "Section 10.6 / 10.7 (POI or Entity with Explicit Location Modifier)",
+          requestedLocationModifier: explicitLocalityName,
+          unhiddenRealWorldMatchesInsideRequestedLocation: insideLocalityPinsCount,
+          ruleForResultsInsideRequestedLocation:
+            isStep1Navigational && insideLocalityPinsCount === 1
+              ? "If query names a specific unique POI and only 1 exists inside -> Rate NAVIGATIONAL. If query is a broader sub-type/category (like 'girls school' without 'Government') or multiple schools/POIs match -> Rate EXCELLENT."
+              : "Rate matching results inside the requested location EXCELLENT (NO distance demotion!).",
+          ruleForResultsOutsideRequestedLocation:
+            insideLocalityPinsCount >= 4
+              ? "MANY matches exist inside requested location -> Rate outside results BAD (Distance/Prominence Issue)."
+              : "FEW/ONE/NONE matches exist inside -> Demote outside results gradually (Good / Acceptable / Bad) based on distance from the requested locality.",
+        };
+      }
     } else {
       selectedTaskData.evaluationMode = {
         mode:
@@ -667,40 +914,51 @@ export async function runStep3FinalEvaluation({
         ).toFixed(2);
 
         // =========================================================
-        // CASE A: EXPLICIT LOCATION MODIFIER (e.g., "hdfc bank surat", "Starbucks SF")
-        // NEVER demote results inside the requested locality for distance from city center!
+        // CASE A: EXPLICIT LOCATION MODIFIER
         // =========================================================
         if (isExplicit) {
-          const cleanMod = String(explicitLocalityName || "").trim().toLowerCase();
+          const cleanMod = String(explicitLocalityName || "")
+            .split(",")[0]
+            .trim()
+            .toLowerCase();
           const addrStr = String(res.address || "").toLowerCase();
           const isAddressInsideRequestedLocality =
             cleanMod.length >= 2 && addrStr.includes(cleanMod);
 
           if (isAddressInsideRequestedLocality) {
+            let insideRule = "";
+            if (isCategoryQuery) {
+              insideRule = `SECTION 10.7.6 / 10.7.7 RULE: Candidate is STRICTLY INSIDE "${explicitLocalityName}". Rate EXCELLENT (NO distance demotion! Ignore user/viewport!). ONLY rate Navigational if the query wording itself is the exact proper name of this specific institution (e.g. if the query only says generic "girls school" without "Government", it is NOT Navigational -> MUST RATE EXCELLENT!).`;
+            } else if (isChainQuery) {
+              insideRule =
+                insideLocalityPinsCount === 1
+                  ? `SECTION 10.6.3 RULE: Candidate is INSIDE "${explicitLocalityName}" and only 1 chain branch exists inside -> Rate NAVIGATIONAL. DO NOT demote for distance!`
+                  : `SECTION 10.6.3 RULE: Candidate is INSIDE "${explicitLocalityName}" where multiple chain branches exist -> Rate EXCELLENT. DO NOT demote for distance!`;
+            } else {
+              insideRule = `Candidate is STRICTLY INSIDE "${explicitLocalityName}". Do NOT demote for distance! Rate EXCELLENT (or Navigational ONLY if the query explicitly named this exact unique institution and only 1 exists).`;
+            }
+
             return {
               ...res,
+              distance_from_requested_locality_center_km: distKm,
               location_modifier_check: `STRICTLY INSIDE "${explicitLocalityName}"`,
-              mandatory_location_modifier_rule:
-                insideLocalityPinsCount === 1
-                  ? `Candidate is INSIDE "${explicitLocalityName}" and only 1 branch exists inside -> Rate NAVIGATIONAL (if name/entity matches). DO NOT demote for distance!`
-                  : `Candidate is INSIDE "${explicitLocalityName}" where multiple branches exist -> MUST RATE EXCELLENT (if name/entity matches). DO NOT demote for distance (${distKm} km from center is irrelevant because it is inside ${explicitLocalityName})!`,
+              mandatory_location_modifier_rule: insideRule,
             };
           } else {
             return {
               ...res,
-              distance_from_requested_location_center_km: distKm,
+              distance_from_requested_locality_center_km: distKm,
               location_modifier_check: `CHECK IF INSIDE OR OUTSIDE "${explicitLocalityName}"`,
               mandatory_location_modifier_rule:
                 insideLocalityPinsCount >= 4
-                  ? `If this address is OUTSIDE "${explicitLocalityName}", rate BAD (Distance/Prominence Issue) because ${insideLocalityPinsCount} branches exist inside "${explicitLocalityName}". If it is inside "${explicitLocalityName}", rate EXCELLENT.`
-                  : `If outside "${explicitLocalityName}", demote gradually (Good / Acceptable / Bad) based on distance (${distKm} km). If inside, rate Excellent/Navigational.`,
+                  ? `If this address is OUTSIDE "${explicitLocalityName}", rate BAD (Distance/Prominence Issue) because ${insideLocalityPinsCount} options exist inside "${explicitLocalityName}". If inside "${explicitLocalityName}", rate EXCELLENT.`
+                  : `If outside "${explicitLocalityName}" (only ${insideLocalityPinsCount} option(s) inside), demote gradually (Good / Acceptable / Bad) based on distance from "${explicitLocalityName}" (${distKm} km) and prominence.`,
             };
           }
         }
 
         // =========================================================
-        // CASE B: NO LOCATION MODIFIER (e.g., "vodafone", "CNG Station", "Pizza")
-        // Uses Outer Viewport Wall distance for FRESH_OUTSIDE, or Radial Circles for all others
+        // CASE B: NO LOCATION MODIFIER
         // =========================================================
         let isInsideViewportBox = false;
         let wallDistKm = null;
@@ -732,7 +990,6 @@ export async function runStep3FinalEvaluation({
         const isFreshInsideUserInside =
           viewportStatusStr.includes("FRESH") && viewportStatusStr.includes("INSIDE");
 
-        // For Fresh Viewport + User Outside, distance is measured from the outer viewport wall/corner!
         const effectiveDistKm =
           isFreshOutsideMode && wallDistKm !== null ? wallDistKm : distKm;
 
@@ -744,9 +1001,6 @@ export async function runStep3FinalEvaluation({
         let zoneRatingCap = "";
         let borderlineGuidance = "High Confidence (Clear Zone)";
 
-        // ---------------------------------------------------------
-        // SUB-CASE B1: FRESH VIEWPORT, USER OUTSIDE (With Pins Inside Viewport)
-        // ---------------------------------------------------------
         if (circleData.mode === "FRESH_OUTSIDE_WITH_INSIDE_PINS") {
           if (isInsideViewportBox) {
             mapZone = "GREEN_RECTANGLE (0 km — Strictly Inside Fresh Viewport)";
@@ -769,12 +1023,7 @@ export async function runStep3FinalEvaluation({
             mapZone = `OUTSIDE_ALL_CIRCLES (> ${circleData.r3Km} km outside viewport wall — Beyond Outer Buffer)`;
             zoneRatingCap = `MUST RATE BAD (Distance/Prominence Issue) — ${effectiveDistKm} km outside viewport wall is beyond all relevance zones and skipped ${closerUnhiddenCount} closer unhidden real-world branches!`;
           }
-        }
-        // ---------------------------------------------------------
-        // SUB-CASE B2: RADIAL CIRCLES (User Inside Fresh Viewport, Stale Viewport, or Proximity)
-        // & FRESH_OUTSIDE_NO_INSIDE_PINS
-        // ---------------------------------------------------------
-        else {
+        } else {
           if (effectiveDistKm <= circleData.r1Km) {
             mapZone = `GREEN_CIRCLE_R1 (<= ${circleData.r1Km} km)`;
             zoneRatingCap = "Eligible for Excellent (or Navigational if unique)";
@@ -800,14 +1049,11 @@ export async function runStep3FinalEvaluation({
               }.`;
             }
           } else {
-            // Candidate is BEYOND Outer Circle r3 (> r3Km)
             if (isFreshInsideUserInside && isInsideViewportBox) {
-              // 🟢 VIEWPORT PROTECTION FLOOR: Candidate is beyond r3, BUT strictly inside the Fresh Viewport box!
               mapZone = `INSIDE_FRESH_VIEWPORT_BEYOND_R3 (${effectiveDistKm} km from user, > ${circleData.r3Km} km r3 circle, but STRICTLY INSIDE Fresh Viewport Box)`;
               zoneRatingCap = `VIEWPORT PROTECTION RULE ACTIVE: Because this candidate is strictly INSIDE the Fresh Viewport rectangle (with User Inside), it CANNOT be rated Bad for distance! Maximum distance demotion is ACCEPTABLE ("Distance/Prominence Issue") — unless it has a User Intent Issue.`;
               borderlineGuidance = `Protected by Fresh Viewport Floor: Even though candidate is ${effectiveDistKm} km from the user (outside r3 = ${circleData.r3Km} km), it lies inside the Fresh Viewport bounds, so distance demotion is capped at Acceptable (never Bad for distance).`;
             } else {
-              // Outside r3 AND outside the Viewport Box -> Rate BAD!
               mapZone = `OUTSIDE_ALL_CIRCLES (> ${circleData.r3Km} km — Beyond Outer Circle r3 and Outside Viewport)`;
               zoneRatingCap = `MUST RATE BAD (Distance/Prominence Issue) — candidate is at ${effectiveDistKm} km, completely outside the outer circle (${circleData.r3Km} km) and outside the viewport, skipping ${closerUnhiddenCount} closer unhidden real-world branches!`;
             }
@@ -830,7 +1076,6 @@ export async function runStep3FinalEvaluation({
 
     // Smart Guideline Router
     let selectedGuidelines = getStepGuidelines(step3, allGuidelines);
-    const qType = String(extractDeepValue(step1Json, "queryType") || "").toLowerCase();
 
     selectedGuidelines = selectedGuidelines.filter((guide) => {
       const label = `${guide.title || ""} ${guide.topic || ""} ${guide.name || ""}`.toLowerCase();
@@ -876,30 +1121,23 @@ export async function runStep3FinalEvaluation({
 You are an AI map quality rating assistant executing STEP 3 (FINAL RELEVANCE EVALUATION).
 
 CRITICAL OVERRIDE RULES FOR STEP 3 (NEVER VIOLATE THESE):
-1. NEVER PENALIZE RELEVANCE FOR THE "CATEGORY" FIELD:
-   - Do NOT use the candidate's \`category\` tag (e.g., "Shopping Plaza", "ATM", "Corporate Office") to mark a Fatal Flaw or demote Relevance!
-   - Check the candidate's \`name\` and actual entity: if the query is for "HDFC Bank" and the candidate \`name\` is "hdfc Bank", it is a valid match for Relevance! The \`category\` classification field is ONLY used for Name Accuracy notes, NEVER for Relevance demotion!
-2. SPECIFIC SUB-FEATURE / MENU / AMENITY / FUEL VERIFICATION (e.g., "CNG Station", "EV Charging", "Non-Veg Restaurant", "Veg Restaurant", "Halal", "24 Hours", "Drive Thru"):
-   - When the query asks for a specific fuel, dietary option, menu item, or amenity (e.g., "CNG Station" -> "Indian Oil Petrol Pump", or "Non-Veg Restaurant" -> a general restaurant whose menu isn't obvious from the name):
-     * NEVER treat a potentially matching business as "Secondary Intent" and NEVER add \`"User Intent Issue"\` to a \`Good\` or \`Acceptable\` rating! (If it were a User Intent Issue, the rating would be \`Bad\`, never \`Good\`!).
-     * Instead, rate its primary \`finalRating\` strictly based on its Map Circle Zone (\`Excellent\`, \`Good\`, or \`Acceptable\`) with ONLY \`"Distance/Prominence Issue"\` (if demoted for distance).
-     * Then, in \`confidence\`, \`alternativeRating\`, and \`reasoning\`, explicitly state:
-       - \`"confidence": "Requires Verification"\`
-       - \`"alternativeRating": "Bad (User Intent Issue) — ONLY IF external verification confirms this location does NOT offer the requested item/service (e.g., no CNG available, or pure-veg only when non-veg was requested)."\`
-3. FRESH VIEWPORT + USER INSIDE PROTECTION RULE (MINIMUM "ACCEPTABLE" FOR DISTANCE INSIDE VIEWPORT):
-   - When the viewport is Fresh and the User is Inside (\`FRESH_INSIDE\`), any relevant candidate that is strictly INSIDE the Fresh Viewport rectangle (\`is_inside_viewport_bounds: true\`) must receive AT LEAST \`Acceptable\` for distance!
-   - Even if the candidate is outside the Orange \`r3\` circle, as long as \`is_inside_viewport_bounds: true\`, its maximum distance demotion is \`Acceptable\` (\`["Distance/Prominence Issue"]\`) — NEVER rate it \`Bad\` for distance! (It can only be rated \`Bad\` for a true \`User Intent Issue\`, OR if \`is_inside_viewport_bounds: false\` and it is outside all circles).
-4. BORDERLINE DISTANCE & ALTERNATIVE RATING RULE:
-   - Check \`borderline_and_alternative_guidance\` on each candidate.
-   - If a candidate is near the boundary between two circles (e.g., borderline between \`Good\` and \`Acceptable\`, or when many closer results exist in the \`Good\` circle so the boundary result may be \`Acceptable\`), state the primary rating in \`finalRating\`, and clearly explain the possible alternative rating in \`alternativeRating\` and \`reasoning\`!
-5. LOCATION MODIFIER QUERIES vs. NON-MODIFIER QUERIES:
-   - IF THE QUERY HAS A GENERAL LOCATION MODIFIER (e.g., "hdfc bank surat", "Starbucks San Francisco"):
-     * NEVER demote any result located INSIDE the requested locality (e.g., inside Surat) for distance!
-     * Distance from the city center anchor point (whether 0.5 km or 10 km) is 100% IRRELEVANT as long as the result is inside the requested locality!
-     * Rate ALL matching branches inside the requested locality as \`Excellent\` (or \`Navigational\` if only 1 exists inside), with \`demotionReasons: []\`.
-     * Only results OUTSIDE the requested locality are demoted.
-   - IF THE QUERY DOES NOT HAVE A LOCATION MODIFIER (e.g., "vodafone", "Whole Foods", "Pizza", "CNG Station"):
-     * Obey the active Map Relevance Circles (\`GREEN_CIRCLE_R1\` = Excellent, \`YELLOW_CIRCLE_R2\` = Good, \`ORANGE_CIRCLE_R3\` = Acceptable, \`INSIDE_FRESH_VIEWPORT_BEYOND_R3\` = Acceptable, \`OUTSIDE_ALL_CIRCLES\` = Bad) and \`mandatory_circle_rating_rule\`.
+1. NEVER CONFUSE "SECTION 10.7.6 / 10.7.7 (CATEGORY + LOCATION MODIFIER)" WITH "SECTION 10.6.3 (CHAIN BUSINESS + LOCATION MODIFIER)":
+   - Do NOT apply Section 10.6.3 (Chain Business) to Category or Generic School/Hospital/Hotel/Airport/Food queries!
+   - When a query is a Category or Sub-Category with a Location Modifier (e.g., "[Malappuram Vengara Girls School]", "[Kilkenny hotel]", "[airport berlin]", "[food in kottayam,kerala]"):
+     * Apply **Section 10.7.6 (Category Query with Location Modifier)** and **Section 10.7.7 (Navigational Results for Category Queries)**.
+     * If the query asks for a generic category like "girls school" (ഗേൾസ് സ്കൂൾ) or "food" in a locality (without naming "Government" / "ഗവൺമെൻ്റ്" or a specific restaurant/school brand in the query), it is **NOT Navigational**!
+     * Under Section 10.7.6, ALL matching category results inside the requested locality receive **Excellent** (NOT Navigational!), and results outside the requested locality are demoted based on distance from the requested locality and how many options exist inside (if many exist inside the locality, outside results are **Bad (Distance/Prominence Issue)**; if only 1 or few exist inside, a nearby match in an adjacent town is demoted to **Good** or **Acceptable** due to \`Distance/Prominence Issue\`).
+2. NEVER HALLUCINATE "PERMANENTLY CLOSED" WHEN STATUS IS NULL:
+   - Look at the candidate's \`status\` field in SELECTED STRUCTURED TASK INPUTS. If \`status\` is \`null\`, \`""\`, or \`"OPEN"\`, the business is **OPEN**!
+   - NEVER set \`"isClosedOrNonExistent": true\` unless the candidate's \`status\` explicitly says \`"CLOSED"\` / \`"PERMANENTLY_CLOSED"\` or ground truth explicitly proves the place does not exist!
+3. NEVER PENALIZE RELEVANCE FOR THE "CATEGORY" FIELD:
+   - Do NOT use the candidate's \`category\` tag (e.g., "Shopping Plaza", "Public School", "Convenience Store") to mark a Fatal Flaw or demote Relevance!
+4. SPECIFIC SUB-FEATURE / MENU / AMENITY / FUEL VERIFICATION (e.g., "CNG Station", "EV Charging", "Non-Veg Restaurant"):
+   - Rate its primary \`finalRating\` strictly based on its Map Circle Zone (\`Excellent\`, \`Good\`, or \`Acceptable\`) with ONLY \`"Distance/Prominence Issue"\` (if demoted for distance), and set \`"confidence": "Requires Verification"\` with \`"alternativeRating"\` explaining it drops to \`Bad (User Intent Issue)\` only if external verification confirms it lacks the requested feature.
+5. FRESH VIEWPORT + USER INSIDE PROTECTION RULE (MINIMUM "ACCEPTABLE" FOR DISTANCE INSIDE VIEWPORT):
+   - When the viewport is Fresh and the User is Inside (\`FRESH_INSIDE\`) on a non-modifier query, any relevant candidate that is strictly INSIDE the Fresh Viewport rectangle (\`is_inside_viewport_bounds: true\`) must receive AT LEAST \`Acceptable\` for distance!
+6. BORDERLINE DISTANCE & ALTERNATIVE RATING RULE:
+   - Check \`borderline_and_alternative_guidance\` on each candidate and include \`confidence\` and \`alternativeRating\`.
 
 CURRENT WORKFLOW STEP:
 ${step3.name || "Final Relevance Evaluation"}
@@ -917,7 +1155,7 @@ GUIDELINES SELECTED FOR THIS STEP:
 ${selectedGuidelinesText}
 
 TASK:
-Evaluate every candidate result in order. Include \`confidence\` and \`alternativeRating\` in each candidate evaluation object whenever there is borderline distance or amenity/menu verification. Return only the JSON evaluation.
+Evaluate every candidate result in order. Include \`confidence\` and \`alternativeRating\` in each candidate evaluation object. Return only the JSON evaluation.
 `;
 
     const rawResult = await executeWithAutoHealing(prompt);
@@ -946,7 +1184,15 @@ Evaluate every candidate result in order. Include \`confidence\` and \`alternati
     return finalPayload;
   } catch (error) {
     console.error("Step 3 Execution Error:", error);
-    return { error: error.message, status: "error" };
+    const errorPayload = {
+      parsedData: parsedTask,
+      steps: Array.isArray(previousSteps) ? previousSteps.slice(0, 2) : [],
+      finalEvaluation: null,
+      status: "error",
+      error: error.message || "Step 3 evaluation failed.",
+    };
+    if (onStepComplete) onStepComplete(errorPayload);
+    return errorPayload;
   }
 }
 
