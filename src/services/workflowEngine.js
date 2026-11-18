@@ -546,9 +546,10 @@ SYSTEM RULES:
     - LOCAL BUSINESS NAMED AFTER A PLACE (KERALA / INDIA TRAP): In Malayalam/India, "ഹോട്ടൽ" (Hotel) often means a local restaurant (e.g. "ഷാർജ ഹോട്ടൽ" / "Sharjah Hotel" or "Bombay Hotel" located right inside the user's Kerala viewport!). Check the candidate results in \`SELECTED STRUCTURED TASK INPUTS\`: if a candidate right inside/near the user's local Kerala viewport has the exact name of the query (e.g. "ഷാർജ ഹോട്ടൽ" in Sulthan Bathery, Kerala), note in \`userIntent\` that the query can either refer to the local restaurant named "Sharjah Hotel" near the user/viewport OR hotels in Sharjah, UAE!
 - SHORT / ACRONYM QUERIES (e.g., "Map", "MBP", "ATM"): Do NOT classify as "No Maps Intent" if local businesses/POIs with that name/acronym exist.
 - LINGUISTIC & GOOGLE MAPS SEARCH QUERY RULE:
-  * Keep \`sanitizedQuery\` natural, simple, and Google-Maps-friendly.
-  * Also provide a broad standard English category in \`"englishCategoryFallback"\` (e.g., "Liquor Store" for "Beverage Stores", "Restaurant" for "ഊണുകൾ").
-
+  - Use standard, official English spellings for Indian/Kerala towns (e.g., "Nileshwaram" not "Nilashvaram", "Kasaragod", "Kozhikode") and include the district in \`boundaryHighlight\` (e.g., "Nileshwaram, Kasaragod").
+  - Keep \`sanitizedQuery\` short and Google-Maps-friendly: strip micro-directions like "near Convent Junction" or "opposite hospital" (e.g., use "Speed Post Office Nileshwaram" instead of "Speed Post near Convent Junction, Perola, Nilashvaram").
+  - Always provide a broad standard English category in \`"englishCategoryFallback"\` (e.g., "Post Office" for "Speed Post", "Liquor Store" for "Beverage Stores", "Restaurant" for "ഊണുകൾ").
+  
 CURRENT WORKFLOW STEP:
 ${step.name || "Step 1: Query Intent"}
 
