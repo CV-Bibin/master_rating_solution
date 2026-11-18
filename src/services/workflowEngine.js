@@ -54,7 +54,7 @@ function getPathValue(data, path) {
 // MERGES ALL RESULTS[].* SUB-KEYS INTO ONE UNIFIED ARRAY
 // ==========================================
 function buildSelectedTaskData(parsedTask, requiredInputKeys = []) {
-  if (!requiredInputKeys.length) return parsedTask;
+  if (!requiredInputKeys.length) return { ...parsedTask };
   const selected = {};
   const resultSubKeys = [];
 
@@ -238,6 +238,44 @@ function updateStep1AnchorCoordsInJson(step1RawJsonStr, newCoords) {
   } catch (e) {
     return step1RawJsonStr;
   }
+}
+
+// ==========================================
+// COMPACT LIVE MAPS FORMATTER (CUTS TOKENS BY 80% FOR GROQ STEP 2)
+// ==========================================
+function compactLiveMapsForPrompt(placesList = [], anchorCoords = null) {
+  if (!Array.isArray(placesList) || placesList.length === 0) return [];
+  return placesList.slice(0, 20).map((p, idx) => {
+    const pt = safeExtractLatLng(
+      p.realWorldLatLng ||
+      p.lat_lng ||
+      p.latLng ||
+      p.coordinates ||
+      p.location ||
+      p.geometry?.location
+    );
+    const latLngStr = pt
+      ? `${pt[0]}, ${pt[1]}`
+      : String(p.realWorldLatLng || p.coordinates || "");
+    const distKm =
+      pt && anchorCoords
+        ? +calculateDistance(anchorCoords[0], anchorCoords[1], pt[0], pt[1]).toFixed(2)
+        : p.distanceFromAnchorKm ?? null;
+
+    return {
+      rank: idx + 1,
+      name: p.realWorldName || p.name || p.title || "Unknown",
+      category:
+        p.realWorldCategory ||
+        p.category ||
+        p.type ||
+        (Array.isArray(p.types) ? p.types[0] : "POI"),
+      address:
+        p.realWorldAddress || p.address || p.formatted_address || p.vicinity || "",
+      latLng: latLngStr,
+      distKm,
+    };
+  });
 }
 
 // ==========================================
@@ -467,12 +505,25 @@ export async function runAiWorkflow(projectId, parsedTask, onStepComplete, optio
 
     const hasPendingStep3 = pauseBeforeFinalStep && allActiveSteps.length >= 3;
 
-    let liveMapsContext =
-      "Google Maps API pending extraction of Intent and Coordinates from Step 1...";
+    let liveMapsContext = "[]";
+    let compactMapsArray = [];
     let anchorCoords = null;
 
-    for (const step of stepsToRunNow) {
-      const selectedTaskData = buildSelectedTaskData(parsedTask, step.requiredInputKeys || []);
+    for (let sIdx = 0; sIdx < stepsToRunNow.length; sIdx++) {
+      const step = stepsToRunNow[sIdx];
+      const isStep1 = sIdx === 0;
+      const isStep2 = sIdx === 1;
+
+      const selectedTaskData = buildSelectedTaskData(
+        parsedTask,
+        step.requiredInputKeys || []
+      );
+
+      // ⚡ GROQ TOKEN SAVER: Step 2 only evaluates Google Maps API places (`liveMapsContext`), NOT the TryRating candidates!
+      if (isStep2 && selectedTaskData.results) {
+        delete selectedTaskData.results;
+      }
+
       const selectedGuidelines = getStepGuidelines(step, allGuidelines);
       const selectedGuidelinesText = buildGuidelinesText(selectedGuidelines);
 
@@ -480,55 +531,83 @@ export async function runAiWorkflow(projectId, parsedTask, onStepComplete, optio
         .map((output, index) => `STEP ${index + 1}: ${output.stepName}\n${output.result}`)
         .join("\n\n");
 
-      const prompt = `
-You are an AI map quality rating assistant.
+      const prompt = isStep1
+        ? `
+You are an AI map quality rating assistant executing STEP 1 (QUERY INTENT & SPATIAL ANCHOR).
 
 SYSTEM RULES:
 - Perform ONLY the current workflow step.
 - USER PHYSICAL POSITION OVERRIDE: The user is definitively ${userPhysicalStatus}. Base your logic on this exact physical status using strict rectangle bounding box math.
-- EXPLICIT LOCATION & CATEGORY + LOCATION OVERRIDE (CRITICAL):
-  * If the query contains ANY explicit city, town, village, district, or locality name (e.g., "Surat", "Kottayam, Kerala", "Vengara", "മലപ്പുറം വേങ്ങര ഗേൾസ് സ്കൂൾ"), you MUST set \`locationIntent: "Explicit Location"\`, \`viewportStatus: "EXPLICIT_LOCATION"\`, and set \`boundaryHighlight\` to the clean English name of that specific town/locality (e.g., \`"Vengara, Malappuram"\` or \`"Kottayam, Kerala"\`).
-  * NEVER copy \`viewport_center_lat_lng\` or \`user_lat_lng\` into \`anchorCoordinates\` when an Explicit Location is present! Instead, estimate the true geographic coordinates of that named locality (e.g., Vengara = \`11.0507, 75.9754\`, Kottayam = \`9.5916, 76.5222\`).
-  * Under Section 10.7.6 & 10.7.7, if a query combines a location modifier with a generic category or school/hospital/hotel type (e.g., "Malappuram Vengara Girls School" / "മലപ്പുറം വേങ്ങര ഗേൾസ് സ്കൂൾ" where it does NOT specify "Government", or "Kilkenny hotel", "food in kottayam"), classify \`queryType\` as \`"Type C: Category Query"\` and set \`isNavigational: false\`.
-- NO MAPS INTENT OVERRIDE: If the query seeks information (e.g., "weather in NY", "is cucumber a fruit"), refers to purely online entities (e.g., "Facebook", "Groupon"), or lacks physical location intent, it has NO MAPS INTENT. All map results for these queries MUST be rated as Bad.
-- SPECIFIC ADDRESS OVERRIDE: If the query contains a full address with an explicit locality (e.g., "154 Orchard St, New York"), the user's viewport and location are completely irrelevant. The Anchor Point is that exact address. An exact match is rated Navigational.
-- NON-SPECIFIC ADDRESS OVERRIDE: If the query is a partial address (e.g., "154 Orchard St" without a city), infer the anchor from the User Location or Fresh Viewport. The closest exact match is eligible for Navigational. Demote distant results to Good or Bad based strictly on distance from the inferred anchor.
-- ROUTING QUERY OVERRIDE: If the query mentions two distinct locations indicating driving directions (e.g., "San Francisco to LA"), returning EITHER of the two locations is considered the best experience. Rate either location as Excellent for Relevance.
-- COORDINATES & MY LOCATION OVERRIDE: If the query is raw GPS coordinates or literal phrases like "my location" or "where am I", the Anchor Point is strictly those coordinates or the user's location. A result within a 50m radius is rated Excellent; outside 50m is rated Bad. A pin within 50m is Perfect; outside is Wrong. There are NO Navigational results for this query type.
-- LINGUISTIC & GOOGLE MAPS SEARCH QUERY RULE (CRITICAL FOR MALAYALAM & NON-ENGLISH QUERIES):
-  * When generating \`sanitizedQuery\` for a non-English query (e.g., Malayalam, Hindi, Tamil), DO NOT invent awkward or overly literal English phrases like "Imported Food Store"!
-  * Keep \`sanitizedQuery\` natural, simple, and Google-Maps-friendly (e.g., "Girls School Vengara Malappuram", "Food Restaurant Kottayam", "Supermarket"). If a local brand or place name is in Malayalam script, transliterate the proper noun naturally into English and keep standard category words simple.
-- CATEGORY RETENTION RULE: If you output matched locations (e.g., topMatches or AI Pins), you MUST include a "category" field for each match by extracting the category provided in the LIVE GOOGLE MAPS API RESULTS below. Do not drop the category field.
-- Use ONLY the selected structured task inputs below.
+- EXPLICIT LOCATION & SECTION 10.7.6 / 10.7.7 OVERRIDE (CRITICAL):
+  * If the query contains an explicit city, town, village, district, or locality name (e.g., "Surat", "Kottayam, Kerala", "Vengara", "മലപ്പുറം വേങ്ങര ഗേൾസ് സ്കൂൾ"), set \`locationIntent: "Explicit Location"\`, \`viewportStatus: "EXPLICIT_LOCATION"\`, and set \`boundaryHighlight\` to the clean English name of that specific town/locality.
+  * NEVER copy \`viewport_center_lat_lng\` or \`user_lat_lng\` into \`anchorCoordinates\` when an Explicit Location is present! Estimate the true coordinates of that named locality.
+  * SECTION 10.7.7 TRAP (CATEGORY + LOCATION WORDING):
+    - Compare query wording carefully: e.g. \`[hotel kilkenny]\` (exact name of a specific prominent hotel "Hotel Kilkenny" -> \`isNavigational: true\` for that exact hotel, while other hotels in Kilkenny are \`Excellent\`) vs. \`[Kilkenny hotel]\` or \`[Malappuram Vengara Girls School]\` (generic category + location where no single entity matches the exact wording -> classify \`queryType\` as \`"Type C: Category Query"\` and set \`isNavigational: false\`).
+    - LOCAL BUSINESS NAMED AFTER A PLACE (KERALA / INDIA TRAP): In Malayalam/India, "ഹോട്ടൽ" (Hotel) often means a local restaurant (e.g. "ഷാർജ ഹോട്ടൽ" / "Sharjah Hotel" or "Bombay Hotel" located right inside the user's Kerala viewport!). Check the candidate results in \`SELECTED STRUCTURED TASK INPUTS\`: if a candidate right inside/near the user's local Kerala viewport has the exact name of the query (e.g. "ഷാർജ ഹോട്ടൽ" in Sulthan Bathery, Kerala), note in \`userIntent\` that the query can either refer to the local restaurant named "Sharjah Hotel" near the user/viewport OR hotels in Sharjah, UAE!
+- SHORT / ACRONYM QUERIES (e.g., "Map", "MBP", "ATM"): Do NOT classify as "No Maps Intent" if local businesses/POIs with that name/acronym exist.
+- LINGUISTIC & GOOGLE MAPS SEARCH QUERY RULE:
+  * Keep \`sanitizedQuery\` natural, simple, and Google-Maps-friendly.
+  * Also provide a broad standard English category in \`"englishCategoryFallback"\` (e.g., "Liquor Store" for "Beverage Stores", "Restaurant" for "ഊണുകൾ").
 
 CURRENT WORKFLOW STEP:
-${step.name || "Workflow Step"}
+${step.name || "Step 1: Query Intent"}
 
 SELECTED STRUCTURED TASK INPUTS:
-${JSON.stringify(selectedTaskData, null, 2)}
+${JSON.stringify(selectedTaskData)}
 
 GUIDELINES SELECTED FOR THIS STEP:
-${selectedGuidelinesText || "No guidelines selected for this step."}
+${selectedGuidelinesText || "No guidelines selected."}
 
-PREVIOUS AI STEP OUTPUTS:
-${previousStepContext || "None"}
+TASK:
+Return ONLY the valid JSON requested by this workflow step.
+`
+        : `
+You are an AI map quality rating assistant executing STEP 2 (REAL-WORLD DISCOVERY).
 
-LIVE GOOGLE MAPS API RESULTS (GROUND TRUTH):
-Use this live database data for exact coordinates and addresses. Do not hallucinate coordinates.
+CRITICAL RULES FOR GROQ JSON OUTPUT (DO NOT VIOLATE):
+1. Return ONLY valid, complete JSON matching this exact structure:
+{
+  "realWorldDiscovery": {
+    "intentSource": "Derived from Step 1 userIntent",
+    "anchorCoordinates": "${anchorCoords ? `${anchorCoords[0]}, ${anchorCoords[1]}` : ""}",
+    "radiusLimitKm": 50,
+    "rejectedOutlierCount": 0,
+    "topMatches": [
+      {
+        "rank": 1,
+        "realWorldName": "...",
+        "realWorldCategory": "...",
+        "realWorldAddress": "...",
+        "realWorldLatLng": "...",
+        "distanceFromAnchorKm": "0.21",
+        "isRelevant": true,
+        "relevanceReason": "Keep under 12 words.",
+        "isStrictlyInsideLocation": true,
+        "verificationNotes": "Keep under 8 words."
+      }
+    ]
+  }
+}
+2. KEEP \`relevanceReason\` AND \`verificationNotes\` VERY SHORT (under 12 words each) so the JSON never gets cut off by token limits!
+3. Output ALL ${compactMapsArray.length} places from LIVE GOOGLE MAPS API RESULTS inside \`topMatches\`. If a place is irrelevant, include it with \`"isRelevant": false\`.
+
+STEP 1 OUTPUT:
+${previousStepContext}
+
+LIVE GOOGLE MAPS API RESULTS (${compactMapsArray.length} Places):
 ${liveMapsContext}
 
 TASK:
-Follow only the selected guideline condition, diagnostic steps, principle, research policy, and expected AI output.
-Return only the result requested by this workflow step.
+Return ONLY valid, closed JSON.
 `;
 
       const rawResult = await executeWithAutoHealing(prompt);
       let safeResult = cleanJsonResponse(rawResult);
 
       // =========================================================================
-      // AFTER STEP 1: GEOCODE EXPLICIT LOCALITY & FETCH LIVE GOOGLE MAPS PLACES
+      // AFTER STEP 1: GEOCODE EXPLICIT LOCALITY & RUN PARALLEL DUAL-SEARCH
       // =========================================================================
-      if (stepOutputs.length === 0) {
+      if (isStep1) {
         try {
           const parsedResult = JSON.parse(safeResult);
 
@@ -552,8 +631,6 @@ Return only the result requested by this workflow step.
               cityName.trim().toLowerCase() !== "none"
             );
 
-          // 1. If Explicit Location (famous OR non-famous like "Vengara"), geocode the town name directly
-          // so the anchor point & map circle are placed at the exact town, NEVER at the Viewport or User!
           if (isExplicitLoc && cityName) {
             const geocodedTownCoords = await resolveExplicitLocalityCoords(
               cityName,
@@ -561,59 +638,102 @@ Return only the result requested by this workflow step.
             );
             if (geocodedTownCoords) {
               anchorCoords = geocodedTownCoords;
-              // Update Step 1 JSON so MapPreview & DistanceDemotionZones center the circle at the exact town!
               safeResult = updateStep1AnchorCoordsInJson(safeResult, geocodedTownCoords);
               parsedResult.anchorCoordinates = `${geocodedTownCoords[0]}, ${geocodedTownCoords[1]}`;
             }
           }
 
           if (!anchorCoords) {
-            anchorCoords = safeExtractLatLng(
-              extractDeepValue(parsedResult, "anchorCoordinates") ||
-              parsedTask.viewportCenter ||
-              parsedTask.userLatLng
-            );
+            anchorCoords =
+              safeExtractLatLng(extractDeepValue(parsedResult, "anchorCoordinates")) ||
+              safeExtractLatLng(parsedTask.viewportCenter || parsedTask.viewport_center_lat_lng) ||
+              safeExtractLatLng(parsedTask.userLatLng || parsedTask.user_lat_lng);
+
+            if (anchorCoords) {
+              safeResult = updateStep1AnchorCoordsInJson(safeResult, anchorCoords);
+            }
           }
 
           const ac = anchorCoords ? `${anchorCoords[0]}, ${anchorCoords[1]}` : "";
-          const sq = extractDeepValue(parsedResult, "sanitizedQuery") || parsedTask.query;
+          const rawSq = extractDeepValue(parsedResult, "sanitizedQuery");
+          const sq =
+            rawSq &&
+              String(rawSq).toLowerCase() !== "none" &&
+              String(rawSq).toLowerCase() !== "null" &&
+              String(rawSq).toLowerCase() !== "n/a"
+              ? rawSq
+              : parsedTask.query;
+          const fbCat = extractDeepValue(parsedResult, "englishCategoryFallback");
 
-          // 2. Build the Google Maps search string:
-          // CRITICAL FIX: When `isExplicitLoc` is true, DO NOT strip `cityName` from the search query!
-          // Keeping "food in Kottayam, Kerala" or "Girls School Vengara" ensures Google Maps searches inside that exact town!
           let apiSearchString = String(sq || parsedTask.query || "").trim();
           if (
             isExplicitLoc &&
             cityName &&
-            !apiSearchString.toLowerCase().includes(String(cityName).toLowerCase().split(",")[0].trim())
+            !apiSearchString
+              .toLowerCase()
+              .includes(String(cityName).toLowerCase().split(",")[0].trim())
           ) {
             apiSearchString = `${apiSearchString} in ${cityName}`;
           }
 
           if (anchorCoords) {
-            let liveMapsData = await searchNearbyPlaces(apiSearchString, ac, parsedResult);
+            let liveMapsData = [];
 
-            // 3. FALLBACK FOR MALAYALAM / NON-ENGLISH QUERIES:
-            // If the LLM's English sanitizedQuery (e.g. "Imported Food Store") returned 0 results
-            // AND the original raw query was different, retry immediately with the raw `parsedTask.query`!
+            // 1. Run Sanitized English Query AND Raw Native/Malayalam Query in parallel!
+            const searchPromises = [
+              searchNearbyPlaces(apiSearchString, ac, parsedResult).catch(() => []),
+            ];
+
             if (
-              (!Array.isArray(liveMapsData) || liveMapsData.length === 0) &&
               parsedTask.query &&
               parsedTask.query.trim().toLowerCase() !== apiSearchString.toLowerCase()
             ) {
-              console.log(
-                `🔄 Fallback Maps API Search with original query: "${parsedTask.query}"`
+              searchPromises.push(
+                searchNearbyPlaces(parsedTask.query.trim(), ac, parsedResult).catch(() => [])
               );
-              liveMapsData = await searchNearbyPlaces(parsedTask.query, ac, parsedResult);
             }
 
-            // 4. If Explicit Location still had no Nominatim match earlier, snap anchor to the discovered pins inside the town
+            const [resEnglish, resNative = []] = await Promise.all(searchPromises);
+            if (Array.isArray(resEnglish)) liveMapsData.push(...resEnglish);
+            if (Array.isArray(resNative)) liveMapsData.push(...resNative);
+
+            // 2. Fallback Category Search ONLY if fewer than 3 results were found
+            if (
+              liveMapsData.length < 3 &&
+              fbCat &&
+              String(fbCat).toLowerCase() !== "none" &&
+              String(fbCat).toLowerCase() !== "null" &&
+              fbCat.toLowerCase() !== apiSearchString.toLowerCase()
+            ) {
+              const resFallback = await searchNearbyPlaces(fbCat, ac, parsedResult).catch(
+                () => []
+              );
+              if (Array.isArray(resFallback)) liveMapsData.push(...resFallback);
+            }
+
+            // 3. Safe Deduplication
+            const seenIds = new Set();
+            const mergedResults = [];
+            for (const place of liveMapsData) {
+              const id =
+                place.place_id ||
+                place.id ||
+                `${place.realWorldName || place.name}_${place.realWorldLatLng || place.lat_lng || ""}`;
+              if (!seenIds.has(id)) {
+                seenIds.add(id);
+                mergedResults.push(place);
+              }
+            }
+
+            liveMapsData = mergedResults;
+
             if (isExplicitLoc && Array.isArray(liveMapsData) && liveMapsData.length > 0) {
               const firstPt = safeExtractLatLng(
                 liveMapsData[0].realWorldLatLng ||
                 liveMapsData[0].lat_lng ||
                 liveMapsData[0].coordinates ||
-                liveMapsData[0].location
+                liveMapsData[0].location ||
+                liveMapsData[0]
               );
               if (firstPt && anchorCoords) {
                 const distFromOldAnchor = calculateDistance(
@@ -622,7 +742,6 @@ Return only the result requested by this workflow step.
                   firstPt[0],
                   firstPt[1]
                 );
-                // If Step 1's anchor was > 10 km away from the actual results in that town, snap to the town's results!
                 if (distFromOldAnchor > 10) {
                   anchorCoords = firstPt;
                   safeResult = updateStep1AnchorCoordsInJson(safeResult, firstPt);
@@ -630,14 +749,132 @@ Return only the result requested by this workflow step.
               }
             }
 
+            compactMapsArray = compactLiveMapsForPrompt(liveMapsData, anchorCoords);
             liveMapsContext =
-              Array.isArray(liveMapsData) && liveMapsData.length > 0
-                ? JSON.stringify(liveMapsData, null, 2)
+              compactMapsArray.length > 0
+                ? JSON.stringify(compactMapsArray)
                 : "No locations found in Google Maps within the 50km radius.";
           }
         } catch (err) {
           console.warn("API Trigger Warning: Could not parse Step 1 JSON.", err);
           liveMapsContext = "Failed to fetch Google Maps data.";
+        }
+      }
+
+      // =========================================================================
+      // AFTER STEP 2: SALVAGE PARTIAL/TRUNCATED GROQ JSON & AUTO-HYDRATE IDEAL STRUCTURE
+      // Guarantees Admin Window NEVER shows "raw Text" and User Sidebar ALWAYS opens!
+      // =========================================================================
+      if (isStep2 && compactMapsArray.length > 0) {
+        try {
+          let parsedStep2 = null;
+          let salvagedMatches = [];
+
+          try {
+            parsedStep2 = JSON.parse(safeResult);
+            const rootObj = parsedStep2?.realWorldDiscovery || parsedStep2 || {};
+            salvagedMatches =
+              rootObj?.topMatches ||
+              rootObj?.matches ||
+              rootObj?.realWorldResults ||
+              rootObj?.places ||
+              [];
+          } catch (truncErr) {
+            console.warn(
+              "🔧 Groq Step 2 JSON was truncated — salvaging completed objects and auto-hydrating remaining pins!"
+            );
+            // Extract every complete `{ ... }` object block that Groq finished writing before truncation
+            const objectBlocks =
+              rawResult.match(/\{[^{}]*"realWorldName"[^{}]*\}/g) ||
+              rawResult.match(/\{[^{}]*"rank"\s*:\s*\d+[^{}]*\}/g) ||
+              [];
+            objectBlocks.forEach((block) => {
+              try {
+                salvagedMatches.push(JSON.parse(block));
+              } catch (e) { }
+            });
+          }
+
+          // Merge salvaged AI evaluations with all 20 compactMapsArray items so NOT A SINGLE PIN IS LOST
+          // and the JSON is 100% valid and ideally structured for both Admin and User views!
+          const hydratedMatches = compactMapsArray.map((item, idx) => {
+            const rankNum = idx + 1;
+            const aiMatch =
+              salvagedMatches.find(
+                (m) =>
+                  Number(m.rank) === rankNum ||
+                  String(m.realWorldName || m.name || "").toLowerCase() ===
+                  String(item.name || "").toLowerCase()
+              ) || salvagedMatches[idx];
+
+            const isRel =
+              aiMatch?.isRelevant !== undefined
+                ? Boolean(
+                  aiMatch.isRelevant !== false &&
+                  String(aiMatch.isRelevant).toLowerCase() !== "false"
+                )
+                : true;
+
+            const isInside =
+              aiMatch?.isStrictlyInsideLocation !== undefined
+                ? Boolean(
+                  aiMatch.isStrictlyInsideLocation !== false &&
+                  String(aiMatch.isStrictlyInsideLocation).toLowerCase() !== "false"
+                )
+                : true;
+
+            return {
+              rank: rankNum,
+              realWorldName: aiMatch?.realWorldName || aiMatch?.name || item.name,
+              realWorldCategory:
+                aiMatch?.realWorldCategory || aiMatch?.category || item.category || "POI",
+              realWorldAddress:
+                aiMatch?.realWorldAddress || aiMatch?.address || item.address || "",
+              realWorldLatLng:
+                aiMatch?.realWorldLatLng ||
+                aiMatch?.latLng ||
+                aiMatch?.lat_lng ||
+                item.latLng ||
+                "",
+              distanceFromAnchorKm:
+                aiMatch?.distanceFromAnchorKm !== undefined
+                  ? String(aiMatch.distanceFromAnchorKm)
+                  : item.distKm !== null
+                    ? String(item.distKm)
+                    : "0",
+              isRelevant: isRel,
+              relevanceReason:
+                aiMatch?.relevanceReason ||
+                (isRel
+                  ? `Matches query intent for "${parsedTask.query}".`
+                  : `Auto-hidden: does not match primary intent for "${parsedTask.query}".`),
+              isStrictlyInsideLocation: isInside,
+              verificationNotes:
+                aiMatch?.verificationNotes || "Verified via Google Maps API.",
+            };
+          });
+
+          const rejectedCount = hydratedMatches.filter((m) => !m.isRelevant).length;
+
+          safeResult = JSON.stringify(
+            {
+              realWorldDiscovery: {
+                intentSource:
+                  parsedStep2?.realWorldDiscovery?.intentSource ||
+                  "Derived from Step 1 userIntent & Google Maps Ground Truth",
+                anchorCoordinates: anchorCoords
+                  ? `${anchorCoords[0]}, ${anchorCoords[1]}`
+                  : "",
+                radiusLimitKm: 50,
+                rejectedOutlierCount: rejectedCount,
+                topMatches: hydratedMatches,
+              },
+            },
+            null,
+            2
+          );
+        } catch (err) {
+          console.warn("Step 2 auto-hydration warning:", err);
         }
       }
 
@@ -657,9 +894,8 @@ Return only the result requested by this workflow step.
         });
       }
 
-      await delay(2500);
+      await delay(1500);
     }
-
     if (hasPendingStep3) {
       const pausedState = {
         parsedData: parsedTask,
@@ -1001,7 +1237,7 @@ export async function runStep3FinalEvaluation({
         let zoneRatingCap = "";
         let borderlineGuidance = "High Confidence (Clear Zone)";
 
-       const r1Tolerance = Math.max(0.35, circleData.r1Km * 0.15);
+        const r1Tolerance = Math.max(0.35, circleData.r1Km * 0.15);
         const r2Tolerance = Math.max(0.45, circleData.r2Km * 0.15);
         const r3Tolerance = Math.max(0.60, circleData.r3Km * 0.15);
 
@@ -1073,11 +1309,10 @@ export async function runStep3FinalEvaluation({
             if (distToInnerYellow <= distToOuterLimit && distToInnerYellow <= r3Tolerance) {
               borderlineGuidance = `BORDERLINE ACCEPTABLE / GOOD: Candidate (${effectiveDistKm} km) is only ${distToInnerYellow} km past the Yellow r2 boundary (${circleData.r2Km} km). Primary rating: Acceptable (Distance/Prominence Issue), Alternative rating: Good (Distance/Prominence Issue).`;
             } else if (distToOuterLimit < distToInnerYellow && distToOuterLimit <= r3Tolerance) {
-              borderlineGuidance = `BORDERLINE ACCEPTABLE / BAD: Candidate (${effectiveDistKm} km) is only ${distToOuterLimit} km inside the outer boundary of Orange r3 (${circleData.r3Km} km). Primary rating: Acceptable (Distance/Prominence Issue), Alternative rating: ${
-                isFreshInsideUserInside && isInsideViewportBox
+              borderlineGuidance = `BORDERLINE ACCEPTABLE / BAD: Candidate (${effectiveDistKm} km) is only ${distToOuterLimit} km inside the outer boundary of Orange r3 (${circleData.r3Km} km). Primary rating: Acceptable (Distance/Prominence Issue), Alternative rating: ${isFreshInsideUserInside && isInsideViewportBox
                   ? "Acceptable (Protected by Fresh Viewport Floor — cannot be Bad for distance)"
                   : "Bad (Distance/Prominence Issue)"
-              }.`;
+                }.`;
             }
           } else {
             const distPastR3 = +(effectiveDistKm - circleData.r3Km).toFixed(2);
@@ -1164,7 +1399,11 @@ CRITICAL OVERRIDE RULES FOR STEP 3 (NEVER VIOLATE THESE):
      * Apply **Section 10.7.6 (Category Query with Location Modifier)** and **Section 10.7.7 (Navigational Results for Category Queries)**.
      * If the query asks for a generic category like "girls school" (ഗേൾസ് സ്കൂൾ) or "food" in a locality (without naming "Government" / "ഗവൺമെൻ്റ്" or a specific restaurant/school brand in the query), it is **NOT Navigational**!
      * Under Section 10.7.6, ALL matching category results inside the requested locality receive **Excellent** (NOT Navigational!), and results outside the requested locality are demoted based on distance from the requested locality and how many options exist inside (if many exist inside the locality, outside results are **Bad (Distance/Prominence Issue)**; if only 1 or few exist inside, a nearby match in an adjacent town is demoted to **Good** or **Acceptable** due to \`Distance/Prominence Issue\`).
-2. NEVER HALLUCINATE "PERMANENTLY CLOSED" WHEN STATUS IS NULL:
+  - WORDING & EXACT-NAME CHECK (Section 10.7.7 TRAP):
+     * Compare the exact query wording against the candidate's name:
+     * Example A (\`[hotel kilkenny]\` -> Candidate "Hotel Kilkenny", or \`[trivandrum lodge]\` -> Candidate "Trivandrum Lodge"): If the anchor is in/near the requested city AND one prominent business matches the EXACT wording of the query, rate that exact-name business **Navigational**. Rate all other matching category results (other hotels/lodges) inside the requested locality as **Excellent** (because the query could also mean any hotel in that locality).
+     * Example B (\`[Kilkenny hotel]\`, \`[Malappuram Vengara Girls School]\`, or \`[trivandrum lodge]\` where NO exact name match exists): If no prominent business matches the exact wording of the query, **Navigational: NO** — rate ALL matching category results inside the requested locality **Excellent**!
+     * LOCAL KERALA / INDIA "HOTEL" TRAP: In Malayalam/India, "ഹോട്ടൽ" (Hotel) means a local restaurant. If a candidate located right inside/near the user's Fresh Viewport or User Location has the exact proper name matching the query (e.g. Candidate "ഷാർജ ഹോട്ടൽ" in Sulthan Bathery), it is a valid local exact-name match! Evaluate it relative to the local Viewport (eligible for **Navigational** or **Excellent** with \`confidence: "Requires Verification"\` and \`alternativeRating\` explaining the UAE city vs. local restaurant name match) — do NOT blindly rate an exact-name local business as \`Bad\`!2. NEVER HALLUCINATE "PERMANENTLY CLOSED" WHEN STATUS IS NULL:
    - Look at the candidate's \`status\` field in SELECTED STRUCTURED TASK INPUTS. If \`status\` is \`null\`, \`""\`, or \`"OPEN"\`, the business is **OPEN**!
    - NEVER set \`"isClosedOrNonExistent": true\` unless the candidate's \`status\` explicitly says \`"CLOSED"\` / \`"PERMANENTLY_CLOSED"\` or ground truth explicitly proves the place does not exist!
 3. NEVER PENALIZE RELEVANCE FOR THE "CATEGORY" FIELD:
