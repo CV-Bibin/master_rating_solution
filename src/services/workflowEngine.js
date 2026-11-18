@@ -706,7 +706,9 @@ Return ONLY valid, closed JSON.
               String(fbCat).toLowerCase() !== "null" &&
               fbCat.toLowerCase() !== apiSearchString.toLowerCase()
             ) {
-              const resFallback = await searchNearbyPlaces(fbCat, ac, parsedResult).catch(
+              const fbSearchStr =
+                isExplicitLoc && cityName ? `${fbCat} in ${cityName}` : fbCat;
+              const resFallback = await searchNearbyPlaces(fbSearchStr, ac, parsedResult).catch(
                 () => []
               );
               if (Array.isArray(resFallback)) liveMapsData.push(...resFallback);
@@ -1409,7 +1411,8 @@ CRITICAL OVERRIDE RULES FOR STEP 3 (NEVER VIOLATE THESE):
    - NEVER set \`"isClosedOrNonExistent": true\` unless the candidate's \`status\` explicitly says \`"CLOSED"\` / \`"PERMANENTLY_CLOSED"\` or ground truth explicitly proves the place does not exist!
 3. NEVER PENALIZE RELEVANCE FOR THE "CATEGORY" FIELD:
    - Do NOT use the candidate's \`category\` tag (e.g., "Shopping Plaza", "Public School", "Convenience Store") to mark a Fatal Flaw or demote Relevance!
-4. SPECIFIC SUB-FEATURE / MENU / AMENITY / FUEL VERIFICATION (e.g., "CNG Station", "EV Charging", "Non-Veg Restaurant"):
+   - FOR OBSCURE OR UNFAMILIAR LOCAL BUSINESSES (e.g., query is "dental" and result is an unfamiliar local practitioner like "Dr. Ramu"): We cannot definitively know the doctor's exact specialty from the name alone. In such ambiguous cases, do not penalize relevance based purely on a missing or generic category tag; trust the provided business classification or assign \`"confidence": "Requires Verification"\` with an \`alternativeRating\` (demoting to Good or Acceptable if location matches, rather than assuming it is completely irrelevant).
+   4. SPECIFIC SUB-FEATURE / MENU / AMENITY / FUEL VERIFICATION (e.g., "CNG Station", "EV Charging", "Non-Veg Restaurant"):
    - Rate its primary \`finalRating\` strictly based on its Map Circle Zone (\`Excellent\`, \`Good\`, or \`Acceptable\`) with ONLY \`"Distance/Prominence Issue"\` (if demoted for distance), and set \`"confidence": "Requires Verification"\` with \`"alternativeRating"\` explaining it drops to \`Bad (User Intent Issue)\` only if external verification confirms it lacks the requested feature.
 5. FRESH VIEWPORT + USER INSIDE PROTECTION RULE (MINIMUM "ACCEPTABLE" FOR DISTANCE INSIDE VIEWPORT):
    - When the viewport is Fresh and the User is Inside (\`FRESH_INSIDE\`) on a non-modifier query, any relevant candidate that is strictly INSIDE the Fresh Viewport rectangle (\`is_inside_viewport_bounds: true\`) must receive AT LEAST \`Acceptable\` for distance!
